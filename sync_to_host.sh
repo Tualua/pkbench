@@ -32,8 +32,6 @@ FILES=(
     pull_results.sh
     bench_vm.sh
     vnc_prep.sh
-    psexec_probe.sh
-    bench_vm_diag.sh
 
     # Python для VM
     run_benchmark.py

@@ -43,7 +43,16 @@
       "Bash(bash -n /workspaces/pkbench/bench_vm_diag.sh)",
       "Bash(python3)",
       "Bash(python3 -m py_compile /workspaces/pkbench/cyberpunk_runner.py /workspaces/pkbench/run_benchmark.py /workspaces/pkbench/run_via_ga.py)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(awk '{print $NF}')",
+      "Bash(git status *)",
+      "Bash(grep -vE \"^\\(LICENSE|pyproject\\\\.toml|pyrightconfig\\\\.json|CONTEXT\\\\.md\\)$\")",
+      "Bash(bash -c 'set -euo pipefail; var=$\\(false\\); echo \"after var=$\\(false\\): got here, var=[$var]\"')",
+      "Bash(echo \"exit: $?\")",
+      "Bash(bash -c 'set -euo pipefail; var=$\\(echo hello | grep absent\\); echo \"after grep: got here\"')",
+      "Bash(failing)",
+      "Bash(echo \"=== Тест: local var=$\\(failing\\) ===\")",
+      "Bash(bash -c ' *)"
     ],
     "additionalDirectories": [
       "/tmp"

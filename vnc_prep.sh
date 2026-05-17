@@ -2,8 +2,7 @@
 #
 # vnc_prep.sh — подготовить VM к VNC-наблюдению за бенчем.
 #
-# Извлечено из vm-vnc-prep.sh минимумом для нашего use-case: ни choco, ни
-# disk tools — только VNC + firewall + iptables.
+# Минимум для нашего use-case: только VNC + firewall + iptables.
 #
 # Использование:
 #   bash vnc_prep.sh <vm>
@@ -35,7 +34,7 @@ for bin in virsh jq base64; do
     command -v "$bin" >/dev/null || { echo "missing dependency: $bin" >&2; exit 1; }
 done
 
-# ── QGA helpers (заимствовано из vm-vnc-prep.sh — используют capture-output) ──
+# ── QGA helpers (capture-output + guest-exec-status + jq-payload) ───────────
 qga_exec_to() {
     local timeout="$1" path="$2" args_json="$3"
     local req pid status out err ec

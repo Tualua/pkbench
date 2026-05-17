@@ -155,7 +155,7 @@ start_http_server() {
 
 # Выполнить PowerShell-скрипт в VM, дождаться выхода, вернуть exit code.
 # Использует -EncodedCommand (UTF-16LE/base64) — обходит quoting hell.
-# capture-output + guest-exec-status работают на современных qga (проверено в vm-vnc-prep.sh).
+# capture-output + guest-exec-status работают на современных qga.
 qga_ps_wait() {
     local timeout_s="$1" ps_script="$2"
     local b64 req pid status ec out err

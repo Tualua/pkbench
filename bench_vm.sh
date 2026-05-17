@@ -28,7 +28,22 @@
 #   2 — бенчмарк отработал, но с ошибкой (exit_code != 0)
 #   3 — проблемы с предусловиями (GA / файлы / net user)
 
-set -euo pipefail
+# pipefail НЕ ставим: наши пайплайны имеют вид `cmd | grep -q ...` или
+# `tr ... | head -c N` — обычные паттерны, где tail-process штатно закрывает
+# pipe и SIGPIPE-ит хвостовой. С pipefail+set -e это превращалось в тихий
+# exit 141 без диагностики. Нам важен rc последней команды — это поведение
+# по умолчанию без pipefail.
+set -eu
+
+# EXIT-trap: на случай если set -e всё-таки убьёт скрипт где-то по делу
+# (typo, неинициализированная var) — печатает реальный rc, чтобы не молчало.
+# Вызывается через trap, shellcheck это не видит.
+# shellcheck disable=SC2317
+on_exit() {
+    local rc=$?
+    [ "$rc" -ne 0 ] && echo "[bench_vm] ABORT rc=$rc (для трассы запусти 'bash -x bench_vm.sh ...')" >&2
+}
+trap on_exit EXIT
 
 VM="${1:?Usage: $0 <vm_name> [config]}"
 CONFIG="${2:-vk}"
@@ -87,43 +102,46 @@ print(json.dumps({
 ' "$path" "$mode"
 }
 
-# Проверить существование файла (через open/close)
+# Проверить существование файла (через open/close).
+# ВНИМАНИЕ: если файла нет, GA возвращает error → virsh exit non-zero → с
+# `set -e` падает САМ скрипт ДО `return 1`. Поэтому `|| true` на всех risky
+# command sub'ах — нам нужен "файл есть/нет", а не остановка bench_vm.sh.
 ga_file_exists() {
     local path="$1"
     local resp handle
-    resp=$(ga_send "$(build_open_payload "$path" "r")")
-    handle=$(echo "$resp" | grep -o '"return":[0-9]*' | grep -o '[0-9]*')
+    resp=$(ga_send "$(build_open_payload "$path" "r")" || true)
+    handle=$(echo "$resp" | grep -o '"return":[0-9]*' | grep -o '[0-9]*' || true)
     [ -z "$handle" ] && return 1
-    ga_send "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":$handle}}" >/dev/null
+    ga_send "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":$handle}}" >/dev/null 2>&1 || true
     return 0
 }
 
-# Прочитать небольшой файл (до ~10 MB) и вывести в stdout
+# Прочитать небольшой файл (до ~10 MB) и вывести в stdout.
+# `|| true` на risky command sub'ах по той же причине что в ga_file_exists.
 ga_read_file() {
     local path="$1"
     local resp handle
-    resp=$(ga_send "$(build_open_payload "$path" "r")")
-    handle=$(echo "$resp" | grep -o '"return":[0-9]*' | grep -o '[0-9]*')
+    resp=$(ga_send "$(build_open_payload "$path" "r")" || true)
+    handle=$(echo "$resp" | grep -o '"return":[0-9]*' | grep -o '[0-9]*' || true)
     [ -z "$handle" ] && return 1
 
     local chunk_size=$((256 * 1024))   # 256 KB чанки
     local content=""
     while true; do
         local fread b64 eof
-        fread=$(ga_send "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":$handle,\"count\":$chunk_size}}")
-        # извлекаем поля через python для надёжности
+        fread=$(ga_send "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":$handle,\"count\":$chunk_size}}" || true)
         b64=$(echo "$fread" | python3 -c "import sys,json
 d=json.loads(sys.stdin.read()).get('return',{})
-print(d.get('buf-b64',''))" 2>/dev/null)
+print(d.get('buf-b64',''))" 2>/dev/null || true)
         eof=$(echo "$fread" | python3 -c "import sys,json
 d=json.loads(sys.stdin.read()).get('return',{})
-print('1' if d.get('eof', False) else '0')" 2>/dev/null)
+print('1' if d.get('eof', False) else '0')" 2>/dev/null || true)
         content="${content}${b64}"
         [ "$eof" = "1" ] && break
         [ -z "$b64" ] && break   # safety: если что-то пошло не так
     done
 
-    ga_send "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":$handle}}" >/dev/null
+    ga_send "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":$handle}}" >/dev/null 2>&1 || true
 
     echo "$content" | base64 -d
 }
