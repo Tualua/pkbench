@@ -1,0 +1,17 @@
+{
+    "pythonVersion": "3.6",
+    "pythonPlatform": "Windows",
+    "include": [
+        "*.py"
+    ],
+    "exclude": [
+        ".devcontainer",
+        "vm_deploy_cache",
+        "results_*"
+    ],
+    "extraPaths": [
+        "vm_lib"
+    ],
+    "reportMissingImports": "none",
+    "reportMissingModuleSource": "none"
+}

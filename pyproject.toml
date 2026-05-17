@@ -1,0 +1,27 @@
+[tool.ruff]
+# Целевая версия рантайма на VM — Python 3.6.x x86 (Windows).
+# Ruff минимально поддерживает py37, но он отлично ловит фичи 3.8+,
+# которые ломают 3.6 (walrus, f-string `{x=}`, Path.unlink(missing_ok=True), и т.д.).
+# Более строгая проверка API стандартной библиотеки — в pyrightconfig.json.
+target-version = "py37"
+line-length = 100
+extend-exclude = [
+    "vm_lib",          # снапшоты GameServer-овых модулей с VM — не наш код
+    "vm_deploy_cache", # кеш ffmpeg и пр.
+    "results_*",       # выгрузки бенчмарков
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "B",   # flake8-bugbear — реальные баги
+    "UP",  # pyupgrade — не предлагает фичи выше target-version
+]
+ignore = [
+    "E501",  # line-too-long — длиной занимается форматтер
+]
+
+[tool.ruff.format]
+quote-style = "preserve"

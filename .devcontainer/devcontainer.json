@@ -1,0 +1,38 @@
+{
+    "name": "pkbench",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/dotnet:2": {
+            "version": "8.0"
+        }
+    },
+    "postCreateCommand": "dotnet tool install -g ilspycmd --version 9.1.0.7988 || dotnet tool update -g ilspycmd --version 9.1.0.7988",
+    "remoteEnv": {
+        "PATH": "/home/vscode/.dotnet/tools:${containerEnv:PATH}"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "anthropic.claude-code",
+                "ms-python.python",
+                "charliermarsh.ruff",
+                "timonwong.shellcheck",
+                "foxundermoon.shell-format",
+                "icsharpcode.ilspy-vscode"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python",
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff"
+                },
+                "[shellscript]": {
+                    "editor.defaultFormatter": "foxundermoon.shell-format"
+                },
+                "shellformat.path": "/usr/bin/shfmt",
+                "files.eol": "\n"
+            }
+        }
+    }
+}

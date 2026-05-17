@@ -1,0 +1,52 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet --version)",
+      "Bash(dotnet tool *)",
+      "Bash(curl -s \"https://api.nuget.org/v3-flatcontainer/ilspycmd/index.json\")",
+      "Bash(ilspycmd --version)",
+      "Bash(dotnet *)",
+      "Bash(dotnet workload *)",
+      "Bash(ilspycmd *)",
+      "Bash(mkdir -p /tmp/bga_decompiled)",
+      "Bash(ilspycmd -o /tmp/bga_decompiled Benchmark.Gta.exe)",
+      "Bash(sfextract --help)",
+      "Bash(mkdir -p /tmp/bga_unbundled)",
+      "Bash(sfextract -o /tmp/bga_unbundled /workspaces/pkbench/benchmark-gta/Benchmark.Gta.exe)",
+      "Read(//tmp/**)",
+      "Bash(mkdir -p /tmp/bga_src && ilspycmd -p -o /tmp/bga_src /tmp/bga_unbundled/Benchmark.Gta.dll 2>&1 | tail -5 && echo \"---\" && find /tmp/bga_src -type d | head -30)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('run_benchmark.py'\\).read\\(\\)\\); print\\('syntax: OK'\\)\")",
+      "Bash(python -m py_compile run_benchmark.py)",
+      "Bash(python -m py_compile cyberpunk_runner.py)",
+      "Bash(python -c ' *)",
+      "Bash(grep -vE '^\\(\\\\.git|\\\\.devcontainer|\\\\.claude|__pycache__|CONTEXT\\\\.md|benchmark-gta|vm_lib|pyproject\\\\.toml|pyrightconfig\\\\.json|\\\\.gitignore\\)$')",
+      "Bash(chmod +x /workspaces/pkbench/sync_to_host.sh)",
+      "Bash(bash -n /workspaces/pkbench/sync_to_host.sh)",
+      "Bash(shellcheck /workspaces/pkbench/sync_to_host.sh)",
+      "Bash(python run_benchmark.py --help)",
+      "Bash(python -m py_compile run_via_ga.py)",
+      "Bash(chmod +x /workspaces/pkbench/bench_vm.sh)",
+      "Bash(bash -n /workspaces/pkbench/bench_vm.sh)",
+      "Bash(shellcheck /workspaces/pkbench/bench_vm.sh)",
+      "Bash(bash -n /workspaces/pkbench/prepare_vm.sh)",
+      "Bash(chmod +x /workspaces/pkbench/vnc_prep.sh)",
+      "Bash(bash -n /workspaces/pkbench/vnc_prep.sh)",
+      "Bash(shellcheck /workspaces/pkbench/vnc_prep.sh)",
+      "Bash(shellcheck /workspaces/pkbench/prepare_vm.sh)",
+      "Bash(awk '{for\\(i=1;i<=NF;i++\\) if\\($i==\"src\"\\) {print $\\(i+1\\); exit}}')",
+      "Bash(bash -n /workspaces/pkbench/__TRACKED_VAR__)",
+      "Bash(chmod +x /workspaces/pkbench/psexec_probe.sh)",
+      "Bash(bash -n /workspaces/pkbench/psexec_probe.sh)",
+      "Bash(shellcheck /workspaces/pkbench/psexec_probe.sh)",
+      "Bash(git rm *)",
+      "Bash(chmod +x /workspaces/pkbench/bench_vm_diag.sh)",
+      "Bash(bash -n /workspaces/pkbench/bench_vm_diag.sh)",
+      "Bash(python3)",
+      "Bash(python3 -m py_compile /workspaces/pkbench/cyberpunk_runner.py /workspaces/pkbench/run_benchmark.py /workspaces/pkbench/run_via_ga.py)",
+      "Bash(python3 -c ' *)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}
