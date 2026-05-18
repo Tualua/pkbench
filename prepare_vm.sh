@@ -8,11 +8,14 @@
 # Что делает:
 #   1. Скачивает ffmpeg (Windows x64 build от BtbN) на хост
 #   2. Копирует через QEMU GA в VM:
-#      - ffmpeg.exe                -> C:\benchmark\
-#      - simulate_nvenc_load.bat   -> C:\benchmark\
-#      - run_benchmark_with_nvenc.ps1 -> C:\benchmark\
+#      - ffmpeg.exe                -> C:\benchmark\   (HTTP-deploy, для NVENC load)
+#      - PsExec.exe                -> C:\benchmark\   (HTTP-deploy, cross-session запуск)
 #      - run_benchmark.py          -> C:\benchmark\
 #      - init_script_reconstructed.py -> C:\benchmark\
+#      - cyberpunk_runner.py       -> C:\benchmark\
+#      - run_via_ga.py             -> C:\benchmark\
+#      - bench_psexec.bat          -> C:\benchmark\
+#      - run_via_ga_launcher.bat   -> C:\benchmark\
 #      - sitecustomize.py          -> C:\Program Files (x86)\Python36-32\lib\site-packages\
 #   3. Проверяет что всё на месте
 
@@ -53,8 +56,6 @@ declare -A LOCAL_FILES=(
     ["init_script_reconstructed.py"]="$SCRIPT_DIR/init_script_reconstructed.py"
     ["cyberpunk_runner.py"]="$SCRIPT_DIR/cyberpunk_runner.py"
     ["run_via_ga.py"]="$SCRIPT_DIR/run_via_ga.py"
-    ["simulate_nvenc_load.bat"]="$SCRIPT_DIR/simulate_nvenc_load.bat"
-    ["run_benchmark_with_nvenc.ps1"]="$SCRIPT_DIR/run_benchmark_with_nvenc.ps1"
     ["bench_psexec.bat"]="$SCRIPT_DIR/bench_psexec.bat"
     ["run_via_ga_launcher.bat"]="$SCRIPT_DIR/run_via_ga_launcher.bat"
 )
@@ -66,8 +67,6 @@ declare -A VM_PATHS=(
     ["init_script_reconstructed.py"]='C:\\benchmark\\init_script_reconstructed.py'
     ["cyberpunk_runner.py"]='C:\\benchmark\\cyberpunk_runner.py'
     ["run_via_ga.py"]='C:\\benchmark\\run_via_ga.py'
-    ["simulate_nvenc_load.bat"]='C:\\benchmark\\simulate_nvenc_load.bat'
-    ["run_benchmark_with_nvenc.ps1"]='C:\\benchmark\\run_benchmark_with_nvenc.ps1'
     ["bench_psexec.bat"]='C:\\benchmark\\bench_psexec.bat'
     ["run_via_ga_launcher.bat"]='C:\\benchmark\\run_via_ga_launcher.bat'
     ["ffmpeg.exe"]='C:\\benchmark\\ffmpeg.exe'
@@ -430,16 +429,10 @@ else
     warn "Deployment завершён с предупреждениями"
 fi
 echo
-echo "Запуск бенчмарка:"
-echo -e "  ${YELLOW}# End-to-end с хоста (рекомендуется): один скрипт, получаем JSON:${NC}"
+echo "Запуск бенчмарка с хоста:"
+echo -e "  ${YELLOW}# Idle (только Cyberpunk):${NC}"
 echo "  bash bench_vm.sh $VM [vk|rt|2k]"
 echo
-echo -e "  ${YELLOW}# Только бенчмарк (без нагрузки на NVENC), вручную из сессии gamer'а:${NC}"
-echo "  python C:\\benchmark\\run_benchmark.py [vk|rt|2k]"
-echo
-echo -e "  ${YELLOW}# Бенчмарк + симуляция NVENC нагрузки (production-режим):${NC}"
-echo "  powershell -ExecutionPolicy Bypass -File C:\\benchmark\\run_benchmark_with_nvenc.ps1 -VmName <dns>"
-echo
-echo -e "  ${YELLOW}# Только NVENC нагрузка (для отдельного тестирования):${NC}"
-echo "  C:\\benchmark\\simulate_nvenc_load.bat [bitrate_kbps]"
+echo -e "  ${YELLOW}# Production (Cyberpunk + NVENC 25 Mbps параллельно):${NC}"
+echo "  bash bench_vm.sh $VM [vk|rt|2k] nvenc"
 echo -e "${CYAN}══════════════════════════════════════════════${NC}"

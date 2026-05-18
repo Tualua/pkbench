@@ -6,9 +6,10 @@ REM "отваливается" сразу, не отдавая stdout/stderr —
 REM запустилось. Здесь редиректим оба потока в psexec.log, который bench_vm.sh
 REM читает через guest-file-read для диагностики.
 REM
-REM Usage: bench_psexec.bat <gamer-password> <bench-config>
+REM Usage: bench_psexec.bat <gamer-password> <bench-config> <load>
 REM   gamer-password: пароль локальной учётки gamer (от bench_vm.sh)
 REM   bench-config:   vk | rt | 2k
+REM   load:           idle | nvenc
 
 REM Флаги:
 REM   -accepteula : без EULA-prompt'а
@@ -29,4 +30,4 @@ REM ОДНА строка-аргумент после /c (вместо двух 
 REM кавычках применяет MSDN-правило 2: strip первой и последней кавычки. Результат:
 REM `C:\benchmark\launcher.bat" "vk` — с встроенной кавычкой, файл не находится.
 REM Через `call ... %~2` всё в одной квотированной строке, cmd распарсит корректно.
-"C:\benchmark\PsExec.exe" -accepteula -u gamer -p "%~1" -i 1 -d cmd.exe /c "call C:\benchmark\run_via_ga_launcher.bat %~2" > "C:\benchmark\psexec.log" 2>&1
+"C:\benchmark\PsExec.exe" -accepteula -u gamer -p "%~1" -i 1 -d cmd.exe /c "call C:\benchmark\run_via_ga_launcher.bat %~2 %~3" > "C:\benchmark\psexec.log" 2>&1

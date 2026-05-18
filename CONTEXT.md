@@ -72,8 +72,7 @@ sitecustomize.py          ← патч pklog для работы без Desktop.
 - `pull_results.sh` — стянуть результаты бенчмарка с VM
 - `find_vm_paths3.sh` — диагностика путей на VM
 - `check_display2.sh` — диагностика дисплея VM
-- `simulate_nvenc_load.bat` — эмуляция нагрузки NVENC через ffmpeg
-- `run_benchmark_with_nvenc.ps1` — бенчмарк + NVENC нагрузка параллельно
+- `bench_psexec.bat` / `run_via_ga_launcher.bat` — внутренние Windows-обёртки (PsExec → cmd → python)
 
 ---
 

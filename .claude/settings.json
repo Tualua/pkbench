@@ -52,7 +52,16 @@
       "Bash(bash -c 'set -euo pipefail; var=$\\(echo hello | grep absent\\); echo \"after grep: got here\"')",
       "Bash(failing)",
       "Bash(echo \"=== Тест: local var=$\\(failing\\) ===\")",
-      "Bash(bash -c ' *)"
+      "Bash(bash -c ' *)",
+      "Bash(python -m py_compile /workspaces/pkbench/run_via_ga.py)",
+      "Bash(chmod +x /workspaces/pkbench/ga_cat.sh)",
+      "Bash(bash -n /workspaces/pkbench/ga_cat.sh)",
+      "Bash(command -v objdump strings nm)",
+      "Bash(objdump --version)",
+      "Bash(objdump -p SharedCapture_x64.dll)",
+      "Bash(awk '/^The Export Tables/,/^The Import Tables/')",
+      "Bash(awk '/KERNEL32/,/^$/')",
+      "Bash(grep -iE '^[A-Za-z0-9_-]+\\\\.dll$')"
     ],
     "additionalDirectories": [
       "/tmp"

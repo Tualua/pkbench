@@ -11,6 +11,6 @@ REM .bat обычным CreateProcess (а не AsUser), .bat запускает 
 REM CreateProcess в уже-аутентифицированной сессии gamer'а.
 REM
 REM Usage: вызывается из bench_psexec.bat → PsExec → cmd /c этот файл.
-REM Аргумент: <bench-config> (vk | rt | 2k).
+REM Аргументы: %1 = <config> (vk | rt | 2k); %2 = <load> (idle | nvenc).
 
-"C:\Program Files (x86)\Python36-32\python.exe" "C:\benchmark\run_via_ga.py" "%~1"
+"C:\Program Files (x86)\Python36-32\python.exe" "C:\benchmark\run_via_ga.py" "%~1" "%~2"

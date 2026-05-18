@@ -32,6 +32,7 @@ FILES=(
     pull_results.sh
     bench_vm.sh
     vnc_prep.sh
+    ga_cat.sh
 
     # Python для VM
     run_benchmark.py
@@ -41,8 +42,6 @@ FILES=(
     sitecustomize.py
 
     # Windows-сторонние утилиты (хост пушит их в VM)
-    simulate_nvenc_load.bat
-    run_benchmark_with_nvenc.ps1
     bench_psexec.bat
     run_via_ga_launcher.bat
 )

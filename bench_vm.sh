@@ -45,8 +45,15 @@ on_exit() {
 }
 trap on_exit EXIT
 
-VM="${1:?Usage: $0 <vm_name> [config]}"
+VM="${1:?Usage: $0 <vm_name> [config] [load]
+  config: vk (default) | rt | 2k
+  load:   idle (default) | nvenc — параллельная нагрузка NVENC через ffmpeg ddagrab}"
 CONFIG="${2:-vk}"
+LOAD="${3:-idle}"
+case "$LOAD" in
+    idle|nvenc) ;;
+    *) echo "ERROR: load must be 'idle' or 'nvenc', got: $LOAD" >&2; exit 2 ;;
+esac
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 PASS_FILE="$SCRIPT_DIR/.gamer_pass.$VM"
@@ -212,7 +219,7 @@ done
 # "session not found", "access denied", "could not start...").
 log "Запуск через bench_psexec.bat (PsExec -u gamer -i -d ...)"
 PAYLOAD=$(build_exec_payload 'cmd.exe' '/c' \
-    'C:\benchmark\bench_psexec.bat' "$PASS" "$CONFIG")
+    'C:\benchmark\bench_psexec.bat' "$PASS" "$CONFIG" "$LOAD")
 pid=$(ga_exec_payload "$PAYLOAD")
 [ -n "$pid" ] || die "guest-exec bench_psexec.bat не отдал PID"
 log "  cmd PID=$pid (отработает за ~1с)"
