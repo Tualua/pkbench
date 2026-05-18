@@ -1,7 +1,7 @@
 #!/bin/bash
-# sync_to_host.sh — копирует файлы бенчмарка в /root/benchmark на хост-гипервизор
-# по SSH/SCP. После этого на хосте можно дёргать prepare_vm.sh / bench_vm.sh
-# / vnc_prep.sh / pull_results.sh относительно /root/benchmark.
+# sync_to_host.sh — копирует pkbench.py и vm_bench.py на хост-гипервизор по
+# SSH/SCP. После этого на хосте `python3 benchmark/pkbench.py <vm> [config]`
+# делает весь флоу (deploy → VNC → bench → pull).
 #
 # Использование:
 #   bash sync_to_host.sh <host>
@@ -25,52 +25,67 @@ else
     SSH_TARGET="${SSH_USER}@${HOST}"
 fi
 
-# Файлы для копирования. Лежат рядом со скриптом.
+# Только эти два файла нужны на хосте. Legacy (старые bash/py/bat) НЕ копируем —
+# на хосте они либо уже есть от прошлого sync, либо не нужны вовсе. __pycache__
+# с pyc'ами тоже не едет (явный список вместо `scp -r` всей папки).
 FILES=(
-    # Хост-сторонние скрипты деплоя/выкачки/запуска
-    prepare_vm.sh
-    pull_results.sh
-    bench_vm.sh
-    vnc_prep.sh
-    ga_cat.sh
+    benchmark/pkbench.py
+    benchmark/vm_bench.py
+    benchmark/steam_backup.py
+)
 
-    # Python для VM
-    run_benchmark.py
-    init_script_reconstructed.py
-    cyberpunk_runner.py
-    run_via_ga.py
-    sitecustomize.py
-
-    # Windows-сторонние утилиты (хост пушит их в VM)
-    bench_psexec.bat
-    run_via_ga_launcher.bat
+# Скрипты с шебангом, на которые нужен +x на хосте.
+EXECUTABLES=(
+    pkbench.py
+    steam_backup.py
 )
 
 echo "=== Sync to $SSH_TARGET:$REMOTE_DIR ==="
 echo
 
-echo "Проверяю наличие локальных файлов..."
+echo "Проверяю локальные файлы..."
 for f in "${FILES[@]}"; do
     [ -f "$SCRIPT_DIR/$f" ] || { echo "ERROR: не найден $SCRIPT_DIR/$f"; exit 1; }
 done
 echo "OK (${#FILES[@]} файлов)"
 echo
 
+# Кавычки вокруг $REMOTE_DIR на remote-стороне: shellcheck Info'у не нравится,
+# что переменная подставляется на клиенте — намеренно (REMOTE_DIR константа,
+# expand'ится один раз перед ssh, имя без пробелов).
 echo "Создаю $REMOTE_DIR на $SSH_TARGET..."
-ssh "$SSH_TARGET" "mkdir -p $REMOTE_DIR"
+ssh "$SSH_TARGET" "mkdir -p '$REMOTE_DIR'"
 echo "OK"
 echo
 
 echo "Копирую..."
-# -p: сохранить mtime/права; -C: сжатие в канале
+# -p: сохранить mtime/права; -C: сжатие в канале.
+# Кладём плоско в $REMOTE_DIR (без подпапки benchmark/): локально файлы лежат
+# в repo/benchmark/, но на хосте сам $REMOTE_DIR уже называется benchmark/ —
+# подпапка дала бы /root/benchmark/benchmark/, что глупо. pkbench.py написан
+# так, что SCRIPT_DIR — где он лежит, vm_deploy_cache/ тоже там же.
+# ${FILES[@]/#/$SCRIPT_DIR/} = добавить $SCRIPT_DIR/ как префикс к каждому.
 scp -pC "${FILES[@]/#/$SCRIPT_DIR/}" "$SSH_TARGET:$REMOTE_DIR/"
+
+# Гарантируем +x на скриптах с шебангом. scp -p должен сохранить локальные права,
+# но если локально кто-то снял или syncер запустили не с тех файловой системы —
+# на хосте они всё равно запустятся как ./<script> благодаря shebang.
+# ${EXECUTABLES[@]/#/$REMOTE_DIR/} = `/root/benchmark/pkbench.py /root/benchmark/steam_backup.py`
+echo "Ставлю +x на ${#EXECUTABLES[@]} исполняемых..."
+ssh "$SSH_TARGET" "chmod +x ${EXECUTABLES[*]/#/$REMOTE_DIR/}"
 echo
 
 echo "=== Готово ==="
 echo
 echo "На хосте:"
 echo "  cd $REMOTE_DIR"
-echo "  bash prepare_vm.sh   <vm_name>            # деплой всех файлов в VM (вкл. PsExec)"
-echo "  sudo bash vnc_prep.sh <vm_name>           # подготовить VNC для наблюдения (port 5900)"
-echo "  bash bench_vm.sh     <vm_name> [vk|rt|2k] # запуск бенча через GA, JSON в stdout"
-echo "  bash pull_results.sh <vm_name>            # выкачать сырые summary.json из VM"
+echo "  # Главная команда: deploy + VNC + бенч + pull одним заходом."
+echo "  # Под sudo — добавляется iptables flush для пробивки VNC."
+echo "  sudo ./pkbench.py <vm> [vk|rt|2k]"
+echo
+echo "  # Steam Trusted Device backup/restore (для обхода 2FA на свежих VM):"
+echo "  ./steam_backup.py backup  <vm>"
+echo "  ./steam_backup.py restore <vm> [--from <other_vm>]"
+echo
+echo "  # Отладочный read файла с VM в stdout:"
+printf '  ./pkbench.py cat <vm> %s\n' "'C:\\benchmark\\last_run.log'"

@@ -2,3 +2,13 @@ benchmark-gta/*
 __pycache__/*
 *.pyc
 .creds/
+
+# Steam Trusted Device tokens — bypass'ят 2FA. Никогда в git.
+benchmark/steam_trusted/
+
+# Кэш ffmpeg/PsExec — ~200MB, не для git.
+benchmark/vm_deploy_cache/
+
+# Локальные пароли gamer на VM (legacy, для совместимости со старыми bash).
+.gamer_pass.*
+SharedCapture_x64.dll
