@@ -82,7 +82,14 @@
       "Bash(ls /workspaces/pkbench/.devcontainer)",
       "Bash(xargs -I{} sh -c 'strings -e l \"{}\" 2>/dev/null | grep -l MailReceiver 2>/dev/null && echo \"FOUND in: {}\"')",
       "WebSearch",
-      "WebFetch(domain:developer.valvesoftware.com)"
+      "WebFetch(domain:developer.valvesoftware.com)",
+      "Bash(grep -v \"test\\\\|debug\\\\|secret\\\\|credentials\\\\|.cs:1$\")",
+      "WebFetch(domain:vkplaycloud.mrgcdn.ru)",
+      "Bash(chmod +x /workspaces/pkbench/benchmark/vm-set-ip.sh)",
+      "Bash(grep -v \"^$\")",
+      "Bash(grep -vE \"^\\(benchmark|benchmark-gta|sync_to_host\\\\.sh|CLAUDE\\\\.md|LICENSE|pyproject\\\\.toml|pyrightconfig\\\\.json|vm_lib|\\\\.creds|\\\\.devcontainer|\\\\.git|\\\\.gitignore|\\\\.claude|SharedCapture_x64\\\\.dll|__pycache__\\)$\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ],
     "additionalDirectories": [
       "/tmp"

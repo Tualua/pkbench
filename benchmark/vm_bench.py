@@ -893,13 +893,15 @@ def kill_steam():
 
 
 def download_wukong_config():
-    """Если папка тула есть — кладём GameUserSettings.ini с CDN. Если нет —
-    значит Wukong не установлен, applaunch это поправит (либо упадёт)."""
-    parent = WUKONG_USER_SETTINGS_INI.parent
-    if not parent.exists():
-        log('  Wukong config dir нет ({0}) — пропуск, applaunch создаст сам'.format(parent))
-        return
+    """Кладём GameUserSettings.ini с CDN. На свежей VM папка
+    b1\\Saved\\Config\\Windows\\ ещё не существует (Wukong не запускался) —
+    создаём mkdir+parents. КРИТИЧНО подкладывать ДО запуска Wukong: дефолтный
+    конфиг UE5 создаётся с PrivacyAgreement=0/FirstSettingFinish=False, и
+    тогда тул показывает first-time setup wizard (выбор языка + accept). CDN-
+    конфиг от GameServer содержит PrivacyAgreement=1, AgreementReaded=1,
+    FirstSettingFinish=True — именно так оригинал обходит wizard."""
     log('Качаю Wukong GameUserSettings.ini: {0}'.format(WUKONG_CONFIG_URL))
+    WUKONG_USER_SETTINGS_INI.parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(WUKONG_CONFIG_URL, str(WUKONG_USER_SETTINGS_INI))
 
 
@@ -1122,6 +1124,9 @@ def run_wukong_benchmark(steam_user, steam_pass, email_creds=None):
             '  2. Тул не активирован на bench-аккаунте — открой '
             'https://store.steampowered.com/app/{1}/ и нажми "Установить".'
             .format(WUKONG_PROCESS, WUKONG_STEAM_APPID))
+
+    # Wizard не появляется: GameUserSettings.ini c CDN уже подложен в
+    # download_wukong_config() с PrivacyAgreement=1/FirstSettingFinish=True.
 
     log('Жду результат в ' + str(WUKONG_RESULTS_DIR))
     result_path = wait_for_wukong_result(WUKONG_BENCH_TIMEOUT_S)

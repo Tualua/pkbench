@@ -32,12 +32,14 @@ FILES=(
     benchmark/pkbench.py
     benchmark/vm_bench.py
     benchmark/steam_backup.py
+    benchmark/vm-set-ip.sh
 )
 
 # Скрипты с шебангом, на которые нужен +x на хосте.
 EXECUTABLES=(
     pkbench.py
     steam_backup.py
+    vm-set-ip.sh
 )
 
 echo "=== Sync to $SSH_TARGET:$REMOTE_DIR ==="
