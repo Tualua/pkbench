@@ -101,13 +101,18 @@ _CLIXML_ESC   = re.compile(r'_x([0-9A-Fa-f]{4})_')
 _CLIXML_MARK  = '#< CLIXML'
 
 
-def _decode_clixml(text):
-    """PowerShell child-process сериализует stderr через CLIXML — XML с
-    <S S="Error">/...</S> блоками + escape-последовательностями _x00NN_ для
-    управляющих символов. Это не выключается флагами CLI. Распаковываем:
-    извлекаем содержимое <S>-нодов, разворачиваем _xNNNN_ → chr(NN).
+_CLIXML_SKIP_KINDS = frozenset(('progress', 'debug', 'verbose', 'information'))
 
-    Не-CLIXML строки возвращаются как есть.
+
+def _decode_clixml(text):
+    """PowerShell child-process сериализует stderr через CLIXML — XML с двумя
+    видами полезной нагрузки:
+      <S S="Error">текст</S>     — простые ошибки/warning'и
+      <Obj S="ErrorRecord">…<ToString>полный текст</ToString>…</Obj>
+                                 — структурированные ErrorRecord'ы (throw, Stop)
+
+    Plus прогресс-/debug-/verbose-объекты — мусор, скрываем.
+    Escape `_xNNNN_` → chr(NN). Не-CLIXML строки возвращаются как есть.
     """
     if not text or _CLIXML_MARK not in text:
         return text
@@ -118,17 +123,28 @@ def _decode_clixml(text):
         root = ET.fromstring(m.group(0))
     except ET.ParseError:
         return text
+
+    def _unescape(s):
+        return _CLIXML_ESC.sub(lambda mm: chr(int(mm.group(1), 16)), s or '')
+
     out_lines = []
-    for s in root.iter('{%s}S' % _CLIXML_NS):
-        kind = s.attrib.get('S', '')
-        if kind in ('progress', ''):
-            continue   # Progress-сообщения PS — мусор, скрываем
-        body = s.text or ''
-        body = _CLIXML_ESC.sub(lambda mm: chr(int(mm.group(1), 16)), body)
-        out_lines.append(body)
+    for child in root:
+        tag = child.tag.rsplit('}', 1)[-1]
+        kind = (child.attrib.get('S') or '').lower()
+        if kind in _CLIXML_SKIP_KINDS:
+            continue
+        if tag == 'S':
+            body = _unescape(child.text)
+            if body:
+                out_lines.append(body)
+        elif tag == 'Obj':
+            # ErrorRecord / WarningRecord / etc. — берём <ToString>
+            ts = child.find('{%s}ToString' % _CLIXML_NS)
+            if ts is not None and ts.text:
+                out_lines.append(_unescape(ts.text))
     if not out_lines:
-        return ''   # был только Progress — ничего полезного
-    return ''.join(out_lines).rstrip()
+        return ''   # был только мусор — ничего полезного
+    return '\n'.join(out_lines).rstrip()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -231,22 +247,37 @@ class GA(object):
         """Выполнить PowerShell-скрипт. Передача через -EncodedCommand
         (UTF-16LE/base64) — обходит quoting hell.
 
-        Обёртка: ErrorActionPreference=Stop + try/catch шлёт error message в
-        stdout как plain text (`ERROR: ...`). Иначе ошибки PS-cmdlet'ов уходят
-        в stderr через CLIXML, причём часто в `<Obj S="ErrorRecord">` node'е,
-        который простой `<S S="Error">`-парсер пропустит. С нашей обёрткой
-        большинство runtime-ошибок ловятся читаемо.
+        Обёртка:
+        • Preferences = SilentlyContinue для Progress/Warning/Verbose/Information.
+          Гасит не-ошибочный CLIXML-шум в stderr. PS всё равно шлёт стартовый
+          Progress "Preparing modules for first use" до того как preferences
+          применятся — decoder его съест, дальше тихо.
+        • try { script } catch { ... exit 1 } — ловит terminating-ошибки (с
+          ErrorActionPreference=Stop сюда падают и non-terminating от cmdlet'ов).
+        • В catch [Console]::Out.WriteLine — пишет напрямую в stdout BYPASS'ом
+          CLIXML/PSHost-сериализации. Иначе под некоторыми комбинациями флагов
+          Write-Output уходит в XML, и сообщение об ошибке оказывается в <Obj>,
+          который decoder может не распарсить.
+
+        НЕ принудительно exit 0 в конце try: внутри скрипта могут быть нативные
+        exe (net.exe, sc.exe), которые легитимно ставят $LASTEXITCODE. Глушить
+        их через `exit 0` = врать вызывающему. Если PS exit code не совпадает с
+        ожиданием — это задача КОНКРЕТНОГО вызывающего верифицировать результат
+        (см. _setup_autologon: после rc!=0 читает registry и решает что делать).
 
         Per-cmdlet `-ErrorAction SilentlyContinue` продолжает работать
         (overrides preference, не глобальный Stop)."""
         wrapped = (
             "$ErrorActionPreference = 'Stop'\n"
             "$ProgressPreference = 'SilentlyContinue'\n"
+            "$WarningPreference = 'SilentlyContinue'\n"
+            "$VerbosePreference = 'SilentlyContinue'\n"
+            "$InformationPreference = 'SilentlyContinue'\n"
             "try {\n"
             + script + "\n"
             "} catch {\n"
-            "    Write-Output ('ERROR: ' + $_.Exception.Message)\n"
-            "    Write-Output ('  at: ' + $_.InvocationInfo.PositionMessage)\n"
+            "    [Console]::Out.WriteLine('ERROR: ' + $_.Exception.Message)\n"
+            "    [Console]::Out.WriteLine('  at: ' + $_.InvocationInfo.PositionMessage)\n"
             "    exit 1\n"
             "}\n"
         )
@@ -258,7 +289,29 @@ class GA(object):
              '-EncodedCommand', b64],
             timeout=timeout,
         )
-        return rc, _decode_clixml(out), _decode_clixml(err)
+        decoded_out = _decode_clixml(out)
+        decoded_err = _decode_clixml(err)
+        # Diagnostic: rc != 0 без видимого текста — почти всегда PS-internal
+        # quirk (module loader, host detection). Возвращаем raw stderr с
+        # пометкой, чтобы вызывающий мог понять что-то отличное от
+        # "(no PS output)". Прячем при rc=0/None (raw обычно содержит только
+        # стартовый Progress и заваливает лог).
+        if rc not in (0, None) and not (decoded_out.strip() or decoded_err.strip()):
+            raw_err = (err or '').strip()
+            raw_out = (out or '').strip()
+            tail = raw_err or raw_out
+            if tail:
+                decoded_err = (
+                    'powershell exited rc={0} с пустым decoded stderr/stdout — '
+                    'обычно PS-internal exit (module loader / host detection). '
+                    'Raw stderr/stdout ниже:\n{1}'
+                ).format(rc, tail[:2000])
+            else:
+                decoded_err = (
+                    'powershell exited rc={0} с полностью пустым stderr/stdout '
+                    '— script мог не запуститься, проверь VM через VNC.'
+                ).format(rc)
+        return rc, decoded_out, decoded_err
 
     # ── файлы ───────────────────────────────────────────────────────────────
     def file_exists(self, path):
@@ -539,6 +592,15 @@ class _BenchHTTPState(object):
     received_status = None
     received_artifacts = None   # dict: original_name -> local Path
     out_lock = None      # threading.Lock для атомарного stderr.write
+    # ffmpeg-tail aggregation: накапливаем key=value блоки от `-progress pipe:1`
+    # и эмитим heartbeat раз в FFMPEG_HEARTBEAT_S вместо дампа всех ~10 строк
+    # в каждом блоке × 6 блоков/мин = 60+ строк/мин в stderr.
+    ffmpeg_block = None             # dict: текущий накопленный stats-блок
+    ffmpeg_last_heartbeat = 0.0     # monotonic time последнего эмитa
+
+
+_FFMPEG_PROGRESS_KEY_RE = re.compile(r'^([a-z][a-z0-9_]*)=(.*)$')
+_FFMPEG_HEARTBEAT_S     = 30.0
 
 
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -631,7 +693,7 @@ class _BenchHTTPHandler(http.server.BaseHTTPRequestHandler):
             if path == '/log':
                 self._handle_log(body, '[vm  ]')
             elif path == '/ffmpeg':
-                self._handle_log(body, '[ffmp]')
+                self._handle_ffmpeg(body)
             elif path == '/artifact':
                 self._handle_artifact(body)
             elif path == '/done':
@@ -658,6 +720,55 @@ class _BenchHTTPHandler(http.server.BaseHTTPRequestHandler):
         with st.out_lock:
             for line in text.splitlines():
                 sys.stderr.write('{0} {1}: {2}\n'.format(prefix, st.vm, line))
+            sys.stderr.flush()
+
+    def _handle_ffmpeg(self, body):
+        """ffmpeg `-progress pipe:1` шлёт блоки key=value (frame=N, fps=X, ...,
+        progress=continue) каждые stats_period (10s). На VM мы их пушим как
+        есть. На хосте дампить всё → 60+ строк/мин спама. Аггрегируем:
+          • key=value: накапливаем в st.ffmpeg_block;
+          • progress=continue: блок завершён; эмитим одну строку `alive:
+            frame=N fps=X speed=Y` если прошло >= FFMPEG_HEARTBEAT_S с прошлого
+            эмитa, иначе молчим;
+          • progress=end: эмитим `ended: ...` со статистикой (всегда);
+          • не-key=value (warnings/errors ffmpeg'a): пропускаем как есть."""
+        text = body.decode('utf-8', errors='replace')
+        if not text:
+            return
+        st = self._state
+        if st.ffmpeg_block is None:
+            st.ffmpeg_block = {}
+        block = st.ffmpeg_block
+        out_lines = []
+        for line in text.splitlines():
+            if not line:
+                continue
+            m = _FFMPEG_PROGRESS_KEY_RE.match(line)
+            if m is None:
+                out_lines.append(line)
+                continue
+            key, val = m.group(1), m.group(2)
+            block[key] = val
+            if key != 'progress':
+                continue
+            if val == 'end':
+                out_lines.append('ended: frame={0} fps={1} speed={2} out_time={3}'.format(
+                    block.get('frame', '?'), block.get('fps', '?'),
+                    block.get('speed', '?'), block.get('out_time', '?')))
+                block.clear()
+                continue
+            now = time.monotonic()
+            if now - st.ffmpeg_last_heartbeat >= _FFMPEG_HEARTBEAT_S:
+                st.ffmpeg_last_heartbeat = now
+                out_lines.append('alive: frame={0} fps={1} speed={2}'.format(
+                    block.get('frame', '?'), block.get('fps', '?'),
+                    block.get('speed', '?')))
+            block.clear()
+        if not out_lines:
+            return
+        with st.out_lock:
+            for line in out_lines:
+                sys.stderr.write('[ffmp] {0}: {1}\n'.format(st.vm, line))
             sys.stderr.flush()
 
     def _handle_artifact(self, body):
@@ -690,15 +801,12 @@ class _BenchHTTPHandler(http.server.BaseHTTPRequestHandler):
 
 def _start_http_server(serve_dir, vm, host_short, timestamp, port):
     """Поднять threaded HTTP-сервер для всего run_all (GET + POST endpoints).
-    Возвращает (server, state). Остановка — server.shutdown()."""
-    # ss-style проверка порта (быстрее, чем bind→fail с stack trace).
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(('0.0.0.0', port))
-        s.close()
-    except OSError:
-        die('Порт {0} уже занят на хосте (используй HTTP_PORT=NNNN)'.format(port))
+    Возвращает (server, state). Остановка — server.shutdown().
 
+    Bind делает сам _ThreadingHTTPServer с SO_REUSEADDR (allow_reuse_address=True),
+    поэтому TIME_WAIT-сокеты с предыдущего прогона binding'у не мешают (раньше
+    был отдельный precheck через голый socket без SO_REUSEADDR — он ругался на
+    TIME_WAIT, хотя реальный сервер забиндился бы)."""
     state = _BenchHTTPState()
     state.serve_dir = str(serve_dir)
     import secrets as _secrets
@@ -710,8 +818,15 @@ def _start_http_server(serve_dir, vm, host_short, timestamp, port):
     state.received_status = None
     state.received_artifacts = {}
     state.out_lock = threading.Lock()
+    state.ffmpeg_block = {}
+    state.ffmpeg_last_heartbeat = 0.0
 
-    server = _ThreadingHTTPServer(('0.0.0.0', port), _BenchHTTPHandler)
+    try:
+        server = _ThreadingHTTPServer(('0.0.0.0', port), _BenchHTTPHandler)
+    except OSError as ex:
+        die('Не смог занять порт {0} на хосте: {1} '
+            '(если "Address already in use" — реально кто-то слушает; '
+            'используй HTTP_PORT=NNNN)'.format(port, ex))
     server._state = state
 
     t = threading.Thread(target=server.serve_forever, daemon=True)
@@ -904,8 +1019,23 @@ def _setup_autologon(ga, user, pw):
     ).format(user=user, pw=pw.replace("'", "''"))
     rc, out, err = ga.ps_wait(ps_script, timeout=15)
     if rc != 0:
-        msg = (out or '').strip() or (err or '').strip() or '(no PS output)'
-        warn('autologon registry write rc={0}:\n{1}'.format(rc, msg))
+        msg = (out or '').strip() or (err or '').strip()
+        # Verify outcome by reading registry — autologon мог записаться даже
+        # при non-zero rc (PS-internal exit от module loader'а после успешного
+        # Set-ItemProperty). Если AutoAdminLogon=1 и DefaultUserName совпал,
+        # warn менее тревожный.
+        verify = ga.ps_wait(
+            "$k='HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon'\n"
+            "$v=Get-ItemProperty -Path $k\n"
+            "Write-Output ($v.AutoAdminLogon + '|' + $v.DefaultUserName)\n",
+            timeout=10)
+        vout = (verify[1] or '').strip()
+        if vout.startswith('1|') and vout.endswith('|' + user):
+            ok('Autologon настроен (verified: rc={0} but registry OK — '
+               'PS-internal exit, ignore)'.format(rc))
+        else:
+            warn('autologon registry write rc={0}, verify={1!r}:\n{2}'.format(
+                rc, vout, msg or '(no PS output)'))
     else:
         ok('Autologon настроен (active после reboot)')
 
@@ -1085,6 +1215,57 @@ def _pull_wukong_result(ga, vm, host_short):
     return _pull_remote_file(ga, remote, fname)
 
 
+def _fmt_fps(v):
+    """Округляем до целого если есть значение, иначе '?'. minFps в summary.json
+    часто float (29.97), для оператора достаточно целого."""
+    if v is None:
+        return '?'
+    try:
+        return str(int(round(float(v))))
+    except (TypeError, ValueError):
+        return '?'
+
+
+def _print_fps_summary(result_text, result_path):
+    """Парсим last_result.json (runs[]) и пишем компактную сводку:
+        Cyberpunk FPS Avg: 110, 111, 109
+        Cyberpunk FPS Min: 22, 23, 22
+        Wukong FPS Avg: 113, 114
+        Wukong FPS Min: 7, 8
+    В одной outer-итерации могут быть оба таска (cp потом wk), показываем оба
+    ряда независимо. Полный JSON остаётся в {result_path}."""
+    try:
+        data = json.loads(result_text)
+    except Exception as ex:
+        warn('last_result.json не парсится как JSON: {0}'.format(ex))
+        sys.stderr.write(result_text + '\n')
+        return
+    runs = data.get('runs') or []
+    if not runs:
+        warn('last_result.json: runs[] пустой')
+        return
+    cp_avg, cp_min, wk_avg, wk_min = [], [], [], []
+    for run in runs:
+        cp = run.get('cyberpunk') or None
+        wk = run.get('wukong') or None
+        if cp:
+            cp_avg.append(_fmt_fps(cp.get('averageFps')))
+            cp_min.append(_fmt_fps(cp.get('minFps')))
+        if wk:
+            wk_avg.append(_fmt_fps(wk.get('FPSAvg')))
+            wk_min.append(_fmt_fps(wk.get('FPSMin')))
+    if result_path is not None:
+        info('full JSON: {0}'.format(result_path.name))
+    if cp_avg:
+        info('Cyberpunk FPS Avg: {0}'.format(', '.join(cp_avg)))
+        info('Cyberpunk FPS Min: {0}'.format(', '.join(cp_min)))
+    if wk_avg:
+        info('Wukong FPS Avg: {0}'.format(', '.join(wk_avg)))
+        info('Wukong FPS Min: {0}'.format(', '.join(wk_min)))
+    if not cp_avg and not wk_avg:
+        warn('runs[] есть, но без cyberpunk/wukong результатов')
+
+
 def run_all(vm, config, steam_user='', steam_pass='', only_wukong=False,
             imap_host='', email_user='', email_pass='', iterations=1):
     """Один большой флоу: deploy → vnc → bench → pull. Делает всё, что раньше
@@ -1220,19 +1401,31 @@ def run_all(vm, config, steam_user='', steam_pass='', only_wukong=False,
             # уже виден оператору через live-логи. Не дублируем.
             sys.exit(2)
 
-        info('Бенч успешен, last_result.json:')
+        # ── Краткий вывод результатов (full JSON уже на диске CWD) ──────────
+        # Раньше дампили весь last_result.json в stdout — оператору не нужен
+        # raw JSON, нужны только avg/min FPS по итерациям. JSON сохранён как
+        # артефакт ({vm}_{host}_{dt}_last_result.json) для дальнейшего парсинга.
         result_path = state.received_artifacts.get('last_result.json')
+        result_text = None
         if result_path and result_path.exists():
-            sys.stdout.write(result_path.read_text(encoding='utf-8', errors='replace'))
-            sys.stdout.write('\n')
-            sys.stdout.flush()
+            result_text = result_path.read_text(encoding='utf-8', errors='replace')
         else:
+            # HTTP /done пришёл, но артефакт не запушен (VM упала сразу после
+            # write of result, до push). Тянем через QGA + пишем на диск.
             warn('last_result.json не получен через HTTP — пробую QGA...')
             result_raw = ga.file_read(VM_RESULT_JSON)
             if result_raw:
-                sys.stdout.write(result_raw.decode('utf-8', errors='replace'))
-                sys.stdout.write('\n')
-                sys.stdout.flush()
+                result_text = result_raw.decode('utf-8', errors='replace')
+                fname = '{vm}_{host}_{dt}_last_result.json'.format(
+                    vm=state.vm, host=state.host_short, dt=state.timestamp)
+                result_path = Path.cwd() / fname
+                result_path.write_bytes(result_raw)
+                ok('QGA fallback last_result.json → {0}'.format(fname))
+
+        if result_text:
+            _print_fps_summary(result_text, result_path)
+        else:
+            warn('last_result.json недоступен ни через HTTP ни через QGA')
 
         # ── Pull результатов summary/wukong (по-прежнему через QGA) ─────────
         # Эти файлы лежат вне C:\benchmark\ (в CD Projekt Red\... и AppData\...),

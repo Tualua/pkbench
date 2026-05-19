@@ -898,14 +898,16 @@ def parse_summary(path):
 
 
 def run_single_iteration(i, total):
-    log('')
-    log('=== Итерация {0}/{1} ==='.format(i, total))
     delete_old_results()
     launch_game()
 
     stop_event = threading.Event()
     threads = [
-        threading.Thread(target=escape_spammer,   args=(stop_event,), daemon=True),
+        # escape_spammer временно отключён для проверки — бенч Cyberpunk
+        # вроде доходит до summary.json и без скипа заставок. Включить обратно
+        # если выяснится что первые секунды записи — это intro cutscene и FPS
+        # средний занижен. См. CLAUDE.md "escape_spammer".
+        # threading.Thread(target=escape_spammer,   args=(stop_event,), daemon=True),
         threading.Thread(target=annoyance_closer, args=(stop_event,), daemon=True),
     ]
     for t in threads:
@@ -1201,6 +1203,7 @@ def run_wukong_benchmark(steam_user, steam_pass, email_creds=None):
     raw = json.loads(result_path.read_text(encoding='utf-8'))
     result = {
         'FPSAvg':      raw.get('FPSAvg'),
+        'FPSMin':      raw.get('FPSMin'),
         'FPS95':       raw.get('FPS95'),
         'GameVer':     raw.get('GameVer'),
         'source_file': str(result_path),
@@ -1420,7 +1423,7 @@ def main():
         # процессом.
         for outer_i in range(1, iterations + 1):
             log('')
-            log('### ВНЕШНЯЯ ИТЕРАЦИЯ {0}/{1} ###'.format(outer_i, iterations))
+            log('### ИТЕРАЦИЯ {0}/{1} ###'.format(outer_i, iterations))
             run_entry = {
                 'iteration':       outer_i,
                 'cyberpunk':       None,

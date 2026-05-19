@@ -90,7 +90,15 @@
       "Bash(grep -vE \"^\\(benchmark|benchmark-gta|sync_to_host\\\\.sh|CLAUDE\\\\.md|LICENSE|pyproject\\\\.toml|pyrightconfig\\\\.json|vm_lib|\\\\.creds|\\\\.devcontainer|\\\\.git|\\\\.gitignore|\\\\.claude|SharedCapture_x64\\\\.dll|__pycache__\\)$\")",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(python3 /tmp/clixml_test.py)"
+      "Bash(python3 /tmp/clixml_test.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench.py'\\).read\\(\\)\\); print\\('pkbench.py OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/vm_bench.py'\\).read\\(\\)\\); print\\('vm_bench.py OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench.py'\\).read\\(\\)\\); print\\('pkbench.py syntax OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/vm_bench.py'\\).read\\(\\)\\); print\\('vm_bench.py syntax OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench.py'\\).read\\(\\)\\); ast.parse\\(open\\('benchmark/vm_bench.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/vm_bench.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(git checkout *)"
     ],
     "additionalDirectories": [
       "/tmp"
