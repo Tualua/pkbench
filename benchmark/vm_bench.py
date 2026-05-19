@@ -48,6 +48,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import urllib.request
 from ctypes import wintypes
 from pathlib import Path
@@ -87,7 +88,8 @@ RESULT_SETTLE_S         = 10
 INTER_ITER_DELAY_S      = 5
 ANNOYANCE_CHECK_S       = 5
 
-ITERATIONS = 2   # 1-й = прогрев, результат берём со 2-го
+CYBERPUNK_DEFAULT_ITERATIONS = 2   # 1-й = прогрев, результат берём со 2-го
+                                   # (если внешний loop N>1 — передаём 1)
 
 ERROR_WINDOWS = ['Отчёт об ошибке Cyberpunk 2077', 'Ошибка']
 ANNOYANCE_WINDOWS = [
@@ -492,7 +494,11 @@ NVENC_WARMUP_S     = 2
 
 FFMPEG_ARGS = [
     '-loglevel', 'error',
-    '-stats',
+    # -progress pipe:1 — пишет key=value progress на stdout раз в stats_period.
+    # Это line-based output, удобно tail'ить в отдельном потоке (см. start_nvenc_load).
+    # Раньше было -stats -stats_period 10, но `-stats` использует \r для in-place
+    # updates — невозможно line-by-line читать.
+    '-progress', 'pipe:1',
     '-stats_period', '10',
     # -re КРИТИЧЕН: без него lavfi отдаёт фреймы as-fast-as-possible, NVENC
     # encoder гонит ~200fps (3.34x) — в 3 раза тяжелее production. С -re ffmpeg
@@ -623,9 +629,16 @@ def _kill_process(name):
     )
 
 
-# ── Логирование (после dup2 идёт в last_run.log) ─────────────────────────────
+# ── Логирование (после dup2 идёт в last_run.log + HTTP-push на хост) ────────
+# Глобальный pusher выставляется в main() если pkbench передал host_url+token.
+_log_pusher = None   # type: HTTPPusher | None
+
+
 def log(msg):
-    print('[bench] ' + msg, flush=True)
+    line = '[bench] ' + msg
+    print(line, flush=True)
+    if _log_pusher is not None:
+        _log_pusher.push_log(line)
 
 
 # ── Setup: ярлык Cyberpunk + DX shaders prewarm ──────────────────────────────
@@ -680,20 +693,65 @@ def prewarm_dx_shaders():
 
 
 # ── NVENC load ───────────────────────────────────────────────────────────────
+def _ffmpeg_tail(proc, log_fh, pusher):
+    """Бэкграунд-поток: читает stdout ffmpeg построчно, пишет в last_ffmpeg.log
+    и push'ит на хост через /ffmpeg для live-tail оператора."""
+    try:
+        for line in proc.stdout:
+            line = line.rstrip('\r\n')
+            if not line:
+                continue
+            try:
+                log_fh.write(line + '\n')
+                log_fh.flush()
+            except Exception:
+                pass
+            if pusher is not None:
+                pusher.push_ffmpeg(line)
+    finally:
+        try:
+            log_fh.close()
+        except Exception:
+            pass
+
+
 def start_nvenc_load():
-    """Запустить ffmpeg-нагрузку. Возвращает (Popen, error_msg)."""
+    """Запустить ffmpeg-нагрузку. Возвращает (Popen, error_msg).
+
+    Если есть _log_pusher (HTTP-канал на хост) — stdout/stderr ffmpeg идёт
+    через PIPE в bg-поток, который пишет в last_ffmpeg.log и push'ит на хост.
+    Иначе — старая логика (stderr=log_fh, stdout=DEVNULL)."""
     if not FFMPEG_EXE.exists():
         return None, 'ffmpeg.exe не найден: ' + str(FFMPEG_EXE)
-    log_fh = open(str(FFMPEG_LOG), 'wb')
+    use_pipe = (_log_pusher is not None)
     try:
-        proc = subprocess.Popen(
-            [str(FFMPEG_EXE)] + FFMPEG_ARGS,
-            stdout=subprocess.DEVNULL,
-            stderr=log_fh,
-            cwd=str(BENCH_DIR),
-        )
+        if use_pipe:
+            log_fh = open(str(FFMPEG_LOG), 'w', encoding='utf-8', buffering=1)
+            proc = subprocess.Popen(
+                [str(FFMPEG_EXE)] + FFMPEG_ARGS,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=str(BENCH_DIR),
+                bufsize=1,
+                universal_newlines=True,
+            )
+            t = threading.Thread(target=_ffmpeg_tail,
+                                 args=(proc, log_fh, _log_pusher),
+                                 daemon=True)
+            t.start()
+        else:
+            log_fh = open(str(FFMPEG_LOG), 'wb')
+            proc = subprocess.Popen(
+                [str(FFMPEG_EXE)] + FFMPEG_ARGS,
+                stdout=subprocess.DEVNULL,
+                stderr=log_fh,
+                cwd=str(BENCH_DIR),
+            )
     except Exception as ex:
-        log_fh.close()
+        try:
+            log_fh.close()
+        except Exception:
+            pass
         return None, 'Popen ffmpeg упал: ' + str(ex)
     time.sleep(NVENC_WARMUP_S)
     if proc.poll() is not None:
@@ -865,7 +923,15 @@ def run_single_iteration(i, total):
         check_error_windows_post_mortem()
 
 
-def run_cyberpunk_benchmark(config):
+def run_cyberpunk_benchmark(config, iterations=CYBERPUNK_DEFAULT_ITERATIONS):
+    """Запустить cyberpunk-бенч `iterations` раз подряд. Возвращает результат
+    с ПОСЛЕДНЕЙ итерации. При iterations>=2 первая считается прогревом
+    (shader-compilation hitches), но мы их явно не отбрасываем — берём
+    последнюю как «installed» state.
+
+    Setup-функции (lnk, shaders prewarm, user settings) идемпотентны — можно
+    вызывать каждый раз без вреда (для внешнего N>1 loop они NO-OP'ятся
+    благодаря guard'ам внутри)."""
     if config not in CYBERPUNK_CONFIGS:
         raise ValueError('Unknown config: ' + config)
     if not CYBERPUNK_EXE.exists():
@@ -876,8 +942,8 @@ def run_cyberpunk_benchmark(config):
     download_user_settings(config)
 
     summary_path = None
-    for i in range(1, ITERATIONS + 1):
-        summary_path = run_single_iteration(i, ITERATIONS)
+    for i in range(1, iterations + 1):
+        summary_path = run_single_iteration(i, iterations)
 
     return parse_summary(summary_path)
 
@@ -1148,6 +1214,102 @@ def run_wukong_benchmark(steam_user, steam_pass, email_creds=None):
     return result
 
 
+# ── HTTP push на хост (live логи + артефакты) ────────────────────────────────
+# pkbench.py поднимает HTTP-сервер на хосте и передаёт URL+token в .bat
+# арг'ах 8/9. Мы используем его для live-логирования (чтобы оператор видел
+# что происходит без VNC и без ga.file_read) и в конце push'им артефакты
+# (last_status/result/run/ffmpeg) — это быстрее QGA через virtio-serial.
+HTTP_BATCH_INTERVAL_S = 1.0     # как часто flush batched log lines
+
+
+class HTTPPusher:
+    """Thread-safe буфер log-строк (log + ffmpeg) + background flusher.
+
+    Каждый push_log/push_ffmpeg добавляет в очередь, background-thread каждую
+    HTTP_BATCH_INTERVAL_S секунд POST'ит накопленные batch'ом в /log или
+    /ffmpeg. Это минимизирует HTTP overhead на каждой строке.
+
+    push_artifact() / push_done() — синхронные (без batching), для финальных
+    действий.
+    """
+
+    def __init__(self, host_url, token):
+        self.host_url = host_url.rstrip('/')
+        self.token = token
+        self._log_buf = []
+        self._ffmpeg_buf = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            self._flush()
+            self._stop.wait(HTTP_BATCH_INTERVAL_S)
+        # Final flush после stop().
+        self._flush()
+
+    def _flush(self):
+        with self._lock:
+            log_batch = self._log_buf
+            ffmpeg_batch = self._ffmpeg_buf
+            self._log_buf = []
+            self._ffmpeg_buf = []
+        if log_batch:
+            self._post('/log', '\n'.join(log_batch).encode('utf-8'),
+                       'text/plain; charset=utf-8')
+        if ffmpeg_batch:
+            self._post('/ffmpeg', '\n'.join(ffmpeg_batch).encode('utf-8'),
+                       'text/plain; charset=utf-8')
+
+    def _post(self, path, data, content_type, query=None):
+        """Synchronous HTTP POST. Тихо игнорирует ошибки (host недоступен — ок,
+        локальный log файл всё равно пишется)."""
+        url = self.host_url + path
+        if query:
+            url = url + '?' + urllib.parse.urlencode(query)
+        req = urllib.request.Request(url, data=data, method='POST')
+        req.add_header('Authorization', 'Bearer ' + self.token)
+        req.add_header('Content-Type', content_type)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+        except Exception:
+            pass
+
+    def push_log(self, line):
+        with self._lock:
+            self._log_buf.append(line)
+
+    def push_ffmpeg(self, line):
+        with self._lock:
+            self._ffmpeg_buf.append(line)
+
+    def push_artifact(self, name, path):
+        """POST /artifact?name=<name> с body = bytes файла. Sync."""
+        try:
+            data = path.read_bytes() if path.exists() else b''
+        except Exception:
+            return
+        if not data:
+            return
+        self._post('/artifact', data, 'application/octet-stream',
+                   query={'name': name})
+
+    def push_done(self, status):
+        """POST /done с status JSON. Sync. Делается в самом конце finally."""
+        body = json.dumps(status, ensure_ascii=False).encode('utf-8')
+        self._post('/done', body, 'application/json; charset=utf-8')
+
+    def stop(self):
+        self._stop.set()
+        try:
+            self._thread.join(timeout=3)
+        except Exception:
+            pass
+
+
 # ── main: stdout/stderr → last_run.log через dup2, статус всегда пишется ─────
 def _redirect_stdio_to_log():
     """Перенаправить fd 1/2 в last_run.log. Через dup2 — чтобы subprocess'ы
@@ -1178,13 +1340,22 @@ def _write_status(status):
 
 
 def main():
-    config      = sys.argv[1] if len(sys.argv) > 1 else 'vk'
-    steam_user  = sys.argv[2] if len(sys.argv) > 2 else ''
-    steam_pass  = sys.argv[3] if len(sys.argv) > 3 else ''
-    only_wukong = (len(sys.argv) > 4 and sys.argv[4] == '1')
-    imap_host   = sys.argv[5] if len(sys.argv) > 5 else ''
-    email_user  = sys.argv[6] if len(sys.argv) > 6 else ''
-    email_pass  = sys.argv[7] if len(sys.argv) > 7 else ''
+    global _log_pusher
+    config        = sys.argv[1]  if len(sys.argv) > 1 else 'vk'
+    steam_user    = sys.argv[2]  if len(sys.argv) > 2 else ''
+    steam_pass    = sys.argv[3]  if len(sys.argv) > 3 else ''
+    only_wukong   = (len(sys.argv) > 4 and sys.argv[4] == '1')
+    imap_host     = sys.argv[5]  if len(sys.argv) > 5 else ''
+    email_user    = sys.argv[6]  if len(sys.argv) > 6 else ''
+    email_pass    = sys.argv[7]  if len(sys.argv) > 7 else ''
+    host_url      = sys.argv[8]  if len(sys.argv) > 8 else ''
+    http_token    = sys.argv[9]  if len(sys.argv) > 9 else ''
+    try:
+        iterations = int(sys.argv[10]) if len(sys.argv) > 10 else 1
+    except ValueError:
+        iterations = 1
+    if iterations < 1:
+        iterations = 1
     email_creds = (imap_host, email_user, email_pass) if (imap_host and email_user and email_pass) else None
 
     # Чистим артефакты прошлого запуска ДО редиректа stdio: появление STATUS_FILE
@@ -1195,12 +1366,28 @@ def main():
 
     _redirect_stdio_to_log()
 
+    log('argv: {0}'.format(sys.argv))
+
+    if host_url and http_token:
+        log('HTTP pusher: {0} (token={1}...)'.format(host_url, http_token[:8]))
+        _log_pusher = HTTPPusher(host_url, http_token)
+    else:
+        log('HTTP pusher: off (host_url={0!r} token={1!r})'.format(
+            host_url, '<set>' if http_token else ''))
+
     wukong_skipped = not (steam_user and steam_pass)
-    log('vm_bench start: config={0} cyberpunk={1} wukong={2}'.format(
+    log('vm_bench start: config={0} cyberpunk={1} wukong={2} iterations={3}'.format(
         config,
         'off' if only_wukong else 'on',
         'on' if not wukong_skipped else 'off',
+        iterations,
     ))
+
+    # Если внешний N>1 — каждая Cyberpunk-итерация делает 1 прогон (warmup
+    # учитывается на уровне внешнего loop'а). При N=1 оставляем стандартное
+    # поведение: 2 внутренних прогона (warmup + final). Это сохраняет
+    # сопоставимость с оригинальным exe для default-кейса.
+    cp_inner = CYBERPUNK_DEFAULT_ITERATIONS if iterations == 1 else 1
 
     started = time.time()
     rc = -1
@@ -1208,9 +1395,9 @@ def main():
     ffmpeg_proc = None
     nvenc_died_early = False
     nvenc_returncode = None
-    cyberpunk_result = None
-    wukong_result = None
-    wukong_error = None
+    runs = []
+    cyberpunk_ok_count = 0
+    wukong_ok_count = 0
 
     try:
         if only_wukong and wukong_skipped:
@@ -1219,69 +1406,88 @@ def main():
                 'Передай STEAM_USER/STEAM_PASS env, либо не ставь ONLY_WUKONG.'
             )
 
-        # NVENC ВСЕГДА — без encoder-нагрузки результат не репрезентативен,
-        # production стримит постоянно. Если ffmpeg не стартовал — фейлим всё.
+        # NVENC поднимается один раз на весь run, держится через все итерации.
         ffmpeg_proc, nvenc_err = start_nvenc_load()
         if ffmpeg_proc is None:
             raise RuntimeError('NVENC load не стартовал: ' + (nvenc_err or 'unknown'))
         log('NVENC load запущен (pid={0})'.format(ffmpeg_proc.pid))
 
-        if not only_wukong:
-            cyberpunk_result = run_cyberpunk_benchmark(config)
+        # ── Внешний loop итераций ───────────────────────────────────────────
+        # Steam логинится один раз (в первой итерации), manifest подкладывается
+        # один раз. Со 2-й итерации steam_ensure_logged_in пропускает relogin
+        # (ActiveUser != 0 + manifest на месте), Wukong просто applaunch'ится
+        # заново с тем же Steam. Cyberpunk запускается каждую итерацию свежим
+        # процессом.
+        for outer_i in range(1, iterations + 1):
+            log('')
+            log('### ВНЕШНЯЯ ИТЕРАЦИЯ {0}/{1} ###'.format(outer_i, iterations))
+            run_entry = {
+                'iteration':       outer_i,
+                'cyberpunk':       None,
+                'wukong':          None,
+                'wukong_error':    None,
+            }
 
-            # Проверка: ffmpeg должен быть жив всё это время. Если умер посреди
-            # бенча — Cyberpunk померил почти-idle под видом production-load,
-            # это надо засчитать как фейл, иначе результат ложно-успешный.
-            if ffmpeg_proc.poll() is not None:
-                nvenc_died_early = True
-                nvenc_returncode = ffmpeg_proc.returncode
-                raise RuntimeError(
-                    'NVENC ffmpeg умер мид-бенч (rc={0}), результат не репрезентативен — '
-                    'см. last_ffmpeg.log'.format(nvenc_returncode)
-                )
+            # Cyberpunk
+            if not only_wukong:
+                run_entry['cyberpunk'] = run_cyberpunk_benchmark(config, iterations=cp_inner)
+                cyberpunk_ok_count += 1
+                if ffmpeg_proc.poll() is not None:
+                    nvenc_died_early = True
+                    nvenc_returncode = ffmpeg_proc.returncode
+                    raise RuntimeError(
+                        'NVENC ffmpeg умер мид-бенч (rc={0}) на iter {1} — '
+                        'результат не репрезентативен'.format(nvenc_returncode, outer_i)
+                    )
 
-        # Wukong — после Cyberpunk (если был). В only_wukong режиме фейл фатал
-        # (нечего больше отдавать), в обычном — мягкий (Cyberpunk уже собран).
-        if not wukong_skipped:
-            try:
-                wukong_result = run_wukong_benchmark(steam_user, steam_pass, email_creds)
-            except Exception:
-                wukong_error = traceback.format_exc()
-                log('Wukong FAIL:\n' + wukong_error)
-                if only_wukong:
-                    raise
+            # Wukong
+            if not wukong_skipped:
+                try:
+                    run_entry['wukong'] = run_wukong_benchmark(steam_user, steam_pass, email_creds)
+                    wukong_ok_count += 1
+                except Exception:
+                    run_entry['wukong_error'] = traceback.format_exc()
+                    log('Wukong FAIL на iter {0}:\n{1}'.format(outer_i, run_entry['wukong_error']))
+                    if only_wukong:
+                        runs.append(run_entry)
+                        raise
+                if ffmpeg_proc.poll() is not None:
+                    nvenc_died_early = True
+                    nvenc_returncode = ffmpeg_proc.returncode
+                    runs.append(run_entry)
+                    raise RuntimeError(
+                        'NVENC ffmpeg умер во время Wukong (rc={0}) на iter {1}'
+                        .format(nvenc_returncode, outer_i)
+                    )
 
-            # NVENC-чек после Wukong (он тоже долгий, ~5 мин).
-            if ffmpeg_proc.poll() is not None:
-                nvenc_died_early = True
-                nvenc_returncode = ffmpeg_proc.returncode
-                raise RuntimeError(
-                    'NVENC ffmpeg умер во время Wukong (rc={0}) — см. last_ffmpeg.log'
-                    .format(nvenc_returncode)
-                )
+            runs.append(run_entry)
 
         rc = 0
         RESULT_FILE.write_text(
-            json.dumps({'cyberpunk': cyberpunk_result, 'wukong': wukong_result},
+            json.dumps({'iterations': iterations, 'runs': runs},
                        ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
-        log('Результат записан в ' + str(RESULT_FILE))
+        log('Результат записан в {0} ({1} runs)'.format(RESULT_FILE, len(runs)))
     except Exception:
         err = traceback.format_exc()
         log('FAIL:\n' + err)
     finally:
-        # Дополнительная проверка на случай если raise был выше по другому
-        # поводу, а ffmpeg тем временем тоже помер — для статуса важно.
         if not nvenc_died_early and ffmpeg_proc is not None and ffmpeg_proc.poll() is not None:
             nvenc_died_early = True
             nvenc_returncode = ffmpeg_proc.returncode
         stop_nvenc_load(ffmpeg_proc)
 
+        # Для backwards-compat поля cyberpunk_present/wukong_present/wukong_error
+        # отражают ПОСЛЕДНЮЮ итерацию (на хосте по ним решается тянуть ли raw
+        # summary/wukong-результат). Полная картина — в last_result.json.runs[].
+        last = runs[-1] if runs else {'cyberpunk': None, 'wukong': None, 'wukong_error': None}
         now = time.time()
         status = {
             'exit_code':       rc,
             'config':          config,
+            'iterations':         iterations,
+            'iterations_done':    len(runs),
             'duration_s':      round(now - started, 1),
             'result_present':  RESULT_FILE.exists(),
             'log_present':     LOG_FILE.exists(),
@@ -1289,20 +1495,32 @@ def main():
             'finished_at':     time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(now)),
             'error':           err,
             'nvenc_source':    'lavfi-testsrc-synthetic',
-            'nvenc_fidelity_note': (
-                'encoder workload matches production (1080p60 H.264 CBR 25Mbps); '
-                'capture stage synthetic — production uses DX swap-chain hook '
-                'injection via SharedCapture_x64.dll, not reproducible standalone'
-            ),
-            'nvenc_died_early':   nvenc_died_early,
-            'nvenc_returncode':   nvenc_returncode,
-            'cyberpunk_skipped':  only_wukong,
-            'cyberpunk_present':  cyberpunk_result is not None,
-            'wukong_skipped':     wukong_skipped,
-            'wukong_present':     wukong_result is not None,
-            'wukong_error':       wukong_error,
+            'nvenc_died_early':       nvenc_died_early,
+            'nvenc_returncode':       nvenc_returncode,
+            'cyberpunk_skipped':      only_wukong,
+            'cyberpunk_present':      last['cyberpunk'] is not None,
+            'cyberpunk_ok_count':     cyberpunk_ok_count,
+            'wukong_skipped':         wukong_skipped,
+            'wukong_present':         last['wukong'] is not None,
+            'wukong_ok_count':        wukong_ok_count,
+            'wukong_error':           last['wukong_error'],
         }
         _write_status(status)
+
+        # ── Push артефактов и /done на хост (если есть HTTP-канал) ──────────
+        # ВАЖНО: push'им ДО stop_nvenc_load и closing pusher'а.
+        if _log_pusher is not None:
+            for name, path in (
+                ('last_run.log',     LOG_FILE),
+                ('last_result.json', RESULT_FILE),
+                ('last_ffmpeg.log',  FFMPEG_LOG),
+                ('last_status.json', STATUS_FILE),
+            ):
+                if path.exists():
+                    _log_pusher.push_artifact(name, path)
+            _log_pusher.push_done(status)
+            # Stop bg-flusher — он сделает final flush очереди log-строк.
+            _log_pusher.stop()
 
 
 if __name__ == '__main__':

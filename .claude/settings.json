@@ -89,7 +89,8 @@
       "Bash(grep -v \"^$\")",
       "Bash(grep -vE \"^\\(benchmark|benchmark-gta|sync_to_host\\\\.sh|CLAUDE\\\\.md|LICENSE|pyproject\\\\.toml|pyrightconfig\\\\.json|vm_lib|\\\\.creds|\\\\.devcontainer|\\\\.git|\\\\.gitignore|\\\\.claude|SharedCapture_x64\\\\.dll|__pycache__\\)$\")",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(python3 /tmp/clixml_test.py)"
     ],
     "additionalDirectories": [
       "/tmp"
