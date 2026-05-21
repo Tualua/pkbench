@@ -30,7 +30,10 @@ fi
 # с pyc'ами тоже не едет (явный список вместо `scp -r` всей папки).
 FILES=(
     benchmark/pkbench.py
+    benchmark/pkbench_multi.py
     benchmark/vm_bench.py
+    benchmark/vm_vnc.py
+    benchmark/vm_vmaware.py
     benchmark/steam_backup.py
     benchmark/vm-set-ip.sh
 )
@@ -38,6 +41,9 @@ FILES=(
 # Скрипты с шебангом, на которые нужен +x на хосте.
 EXECUTABLES=(
     pkbench.py
+    pkbench_multi.py
+    vm_vnc.py
+    vm_vmaware.py
     steam_backup.py
     vm-set-ip.sh
 )

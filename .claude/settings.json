@@ -98,7 +98,26 @@
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench.py'\\).read\\(\\)\\); ast.parse\\(open\\('benchmark/vm_bench.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/vm_bench.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(chmod +x /workspaces/pkbench/benchmark/pkbench_multi.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/workspaces/pkbench/benchmark/pkbench_multi.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 pkbench_multi.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench_multi.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python3 benchmark/pkbench_multi.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench_multi.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(STEAM_USER=common@e.com STEAM_PASS=foo python3 benchmark/pkbench_multi.py vk vm043 vm044)",
+      "Bash(STEAM_USER=common@e.com STEAM_USER_vm043=acc1@e.com STEAM_USER_vm044=acc2@e.com STEAM_PASS=foo python3 benchmark/pkbench_multi.py vk vm043 vm044)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/workspaces/pkbench/benchmark/vm_bench.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/workspaces/pkbench/benchmark/pkbench.py'\\).read\\(\\)\\); print\\('pkbench OK'\\)\")",
+      "Bash(chmod +x /workspaces/pkbench/benchmark/vm_vnc.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/workspaces/pkbench/benchmark/vm_vnc.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 benchmark/vm_vnc.py)",
+      "Bash(chmod +x /workspaces/pkbench/benchmark/vm_vmaware.py)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/workspaces/pkbench/benchmark/vm_vmaware.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('benchmark/pkbench.py'\\).read\\(\\)\\); ast.parse\\(open\\('benchmark/pkbench_multi.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:gist.githubusercontent.com)"
     ],
     "additionalDirectories": [
       "/tmp"

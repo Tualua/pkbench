@@ -451,6 +451,8 @@ VM_PYTHON    = r'C:\Program Files (x86)\Python36-32\python.exe'
 # PsExec.exe больше не используется (заменено на schtasks). Если оставлять — не
 # мешает, на VM просто лежит без вызовов. Не деплоим.
 VM_FFMPEG    = r'C:\benchmark\ffmpeg.exe'
+VM_FIO_MSI   = r'C:\benchmark\fio.msi'                      # куда заливаем установщик
+VM_FIO       = r'C:\Program Files\fio\fio.exe'              # куда msiexec /i ставит exe
 VM_VMBENCH   = r'C:\benchmark\vm_bench.py'
 VM_PYTHONW   = r'C:\Program Files (x86)\Python36-32\pythonw.exe'
 VM_STATUS_JSON   = r'C:\benchmark\last_status.json'
@@ -460,6 +462,12 @@ VM_RUN_LOG       = r'C:\benchmark\last_run.log'
 # URLs для скачивания бинарей
 FFMPEG_URL  = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
 PSTOOLS_URL = 'https://download.sysinternals.com/files/PSTools.zip'
+# FIO Windows builds — официальный axboe/fio с GitHub releases (с fio-3.42 они
+# публикуют x64/x86 MSI прямо в release assets). URL резолвится в runtime через
+# API, чтобы автоматом подхватывать новые версии. MSI распаковываем через 7z
+# (требует p7zip на хосте: yum install p7zip).
+FIO_REPO         = 'axboe/fio'
+FIO_RELEASES_API = 'https://api.github.com/repos/{0}/releases/latest'.format(FIO_REPO)
 
 def _generate_gamer_pass():
     """Свежий случайный пароль на каждый прогон. На диск не пишется — printится
@@ -865,6 +873,40 @@ def _http_put_via_vm(ga, host_ip, port, filename, dst_win_path,
 # ════════════════════════════════════════════════════════════════════════════
 #  Утилиты деплоя (скачивание бинарей, заливка через GA)
 # ════════════════════════════════════════════════════════════════════════════
+import ssl as _ssl
+import urllib.error as _urllib_error
+
+
+def _url_open(url, timeout=60):
+    """urlopen с fallback на unverified SSL context.
+
+    На OL7 ca-bundle устарел и не верифицирует Let's Encrypt новые
+    промежуточные серты (bsdio.com, новые github.com cert chains). Все URL,
+    которые мы качаем, — pinned (заданы константой в коде), не пользовательский
+    ввод; MITM-risk минимальный, обновление ca-bundle на хосте — отдельная
+    задача."""
+    try:
+        return urllib.request.urlopen(url, timeout=timeout)
+    except (_ssl.SSLError, _urllib_error.URLError) as ex:
+        msg = str(ex)
+        if 'CERTIFICATE_VERIFY' not in msg and 'SSL' not in msg:
+            raise
+        warn('SSL verify FAIL для {0} — retry с unverified context (OL7 ca-bundle устарел?)'.format(url))
+        ctx = _ssl._create_unverified_context()
+        return urllib.request.urlopen(url, timeout=timeout, context=ctx)
+
+
+def _url_download(url, dst, timeout=300):
+    """Скачать URL → dst (Path), streaming. С SSL-fallback (см. _url_open)."""
+    with _url_open(url, timeout=timeout) as r:
+        with open(str(dst), 'wb') as f:
+            while True:
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+
 def _download_ffmpeg(dst_exe):
     """Скачивает ffmpeg.exe в dst_exe. Кэширует."""
     if dst_exe.exists():
@@ -872,7 +914,7 @@ def _download_ffmpeg(dst_exe):
         return
     info('Качаю ffmpeg (BtbN win64-gpl)...')
     zip_path = dst_exe.with_suffix('.zip')
-    urllib.request.urlretrieve(FFMPEG_URL, str(zip_path))
+    _url_download(FFMPEG_URL, zip_path)
     info('Распаковываю ffmpeg.exe из zip...')
     with zipfile.ZipFile(str(zip_path)) as zf:
         # В архиве: ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe
@@ -889,13 +931,47 @@ def _download_ffmpeg(dst_exe):
     ok('ffmpeg.exe готов ({0})'.format(_human_size(dst_exe.stat().st_size)))
 
 
+def _resolve_fio_msi_url():
+    """GitHub API → URL latest fio-*-x64.msi asset из axboe/fio releases."""
+    req = urllib.request.Request(
+        FIO_RELEASES_API,
+        headers={'Accept': 'application/vnd.github+json',
+                 'User-Agent': 'pkbench/1.0'},
+    )
+    with _url_open(req, timeout=20) as r:
+        data = json.loads(r.read().decode('utf-8'))
+    tag = data.get('tag_name', '?')
+    for a in data.get('assets') or []:
+        name = (a.get('name') or '').lower()
+        if name.endswith('-x64.msi'):
+            return tag, a['name'], a['browser_download_url']
+    die('В releases {0} ({1}) нет *-x64.msi asset\'a. assets: {2}'.format(
+        FIO_REPO, tag, [a.get('name') for a in data.get('assets') or []]))
+
+
+def _download_fio_msi(dst_msi):
+    """Скачать FIO Windows MSI из axboe/fio GitHub release в кэш. Установка
+    на VM делается через msiexec /i ... /qn (нативно Windows, никаких p7zip).
+    Atomic через tmp+rename, чтобы parallel pkbench.py не корраптили."""
+    if dst_msi.exists():
+        ok('fio.msi уже скачан ({0})'.format(_human_size(dst_msi.stat().st_size)))
+        return
+    info('Запрос latest release {0}...'.format(FIO_REPO))
+    tag, name, url = _resolve_fio_msi_url()
+    info('Качаю {0} ({1})...'.format(name, tag))
+    tmp = dst_msi.with_suffix('.tmp')
+    _url_download(url, tmp)
+    tmp.replace(dst_msi)
+    ok('fio.msi готов ({0})'.format(_human_size(dst_msi.stat().st_size)))
+
+
 def _download_psexec(dst_exe):
     if dst_exe.exists():
         ok('PsExec.exe уже скачан ({0})'.format(_human_size(dst_exe.stat().st_size)))
         return
     info('Качаю PSTools.zip...')
     zip_path = dst_exe.parent / 'PSTools.zip'
-    urllib.request.urlretrieve(PSTOOLS_URL, str(zip_path))
+    _url_download(PSTOOLS_URL, zip_path)
     info('Извлекаю PsExec.exe...')
     with zipfile.ZipFile(str(zip_path)) as zf:
         with zf.open('PsExec.exe') as src, open(str(dst_exe), 'wb') as dst:
@@ -1241,9 +1317,6 @@ def _print_fps_summary(result_text, result_path):
         sys.stderr.write(result_text + '\n')
         return
     runs = data.get('runs') or []
-    if not runs:
-        warn('last_result.json: runs[] пустой')
-        return
     cp_avg, cp_min, wk_avg, wk_min = [], [], [], []
     for run in runs:
         cp = run.get('cyberpunk') or None
@@ -1262,25 +1335,61 @@ def _print_fps_summary(result_text, result_path):
     if wk_avg:
         info('Wukong FPS Avg: {0}'.format(', '.join(wk_avg)))
         info('Wukong FPS Min: {0}'.format(', '.join(wk_min)))
-    if not cp_avg and not wk_avg:
+    if not cp_avg and not wk_avg and not data.get('disk'):
         warn('runs[] есть, но без cyberpunk/wukong результатов')
+
+    disk = data.get('disk') or {}
+    patterns = disk.get('patterns') or {}
+    # CDM-style лейблы в фиксированном порядке. Должно совпадать с
+    # vm_bench.FIO_PATTERN_ORDER, но мы дублируем здесь чтобы host не зависел
+    # от import'a vm_bench.
+    cdm_order = (
+        ('seq-1m-q8',  'SEQ 1M  Q8'),
+        ('seq-1m-q1',  'SEQ 1M  Q1'),
+        ('rnd-4k-q32', 'RND 4K Q32'),
+        ('rnd-4k-q1',  'RND 4K  Q1'),
+    )
+    if patterns:
+        info('Disk ({0} dataset):'.format(disk.get('dataset_size') or '?'))
+        for pid, label in cdm_order:
+            p = patterns.get(pid) or {}
+            r = p.get('read')  or {}
+            w = p.get('write') or {}
+            # RND-фазы — IOPS интересен (мелкий block). SEQ — bandwidth. Везде latency.
+            is_rnd = pid.startswith('rnd-')
+            if is_rnd:
+                info('  {0}:  Read {1:>7.1f} MB/s ({2:>5d}k IOPS, lat {3:5.2f}ms)   Write {4:>7.1f} MB/s ({5:>5d}k IOPS, lat {6:5.2f}ms)'.format(
+                    label,
+                    r.get('bw_mb_s') or 0, int((r.get('iops') or 0) / 1000), r.get('lat_ms') or 0,
+                    w.get('bw_mb_s') or 0, int((w.get('iops') or 0) / 1000), w.get('lat_ms') or 0))
+            else:
+                info('  {0}:  Read {1:>7.1f} MB/s (lat {2:5.2f}ms)              Write {3:>7.1f} MB/s (lat {4:5.2f}ms)'.format(
+                    label,
+                    r.get('bw_mb_s') or 0, r.get('lat_ms') or 0,
+                    w.get('bw_mb_s') or 0, w.get('lat_ms') or 0))
 
 
 def run_all(vm, config, steam_user='', steam_pass='', only_wukong=False,
-            imap_host='', email_user='', email_pass='', iterations=1):
+            imap_host='', email_user='', email_pass='', iterations=1,
+            only_disk=False, skip_disk=False):
     """Один большой флоу: deploy → vnc → bench → pull. Делает всё, что раньше
     делали 5 подкоманд. Steam credentials — опциональны, для Wukong-таска.
     only_wukong (debug-режим ENV ONLY_WUKONG=1) пропускает Cyberpunk.
+    only_disk (ENV ONLY_DISK=1) — только FIO disk-бенч, без cp/wk/NVENC.
+    skip_disk (ENV SKIP_DISK=1) — пропустить disk-фазу (только cp/wk).
     imap_host/email_user/email_pass — опциональный auto Steam Guard 2FA."""
-    wukong_on = bool(steam_user and steam_pass)
+    wukong_on = bool(steam_user and steam_pass) and not only_disk
     email_on = bool(imap_host and email_user and email_pass)
-    if only_wukong and not wukong_on:
+    if only_wukong and not wukong_on and not only_disk:
         die('ONLY_WUKONG=1 задан, но нет Steam credentials — нечего запускать. '
             'Передай STEAM_USER=... STEAM_PASS=... через env.', rc=2)
-    info('VM={0}  config={1}  load=nvenc (always)  cyberpunk={2}  wukong={3}  steam_guard_auto={4}'.format(
+    cp_on = not (only_wukong or only_disk)
+    disk_on = not skip_disk or only_disk
+    info('VM={0}  config={1}  cyberpunk={2}  wukong={3}  disk={4}  steam_guard_auto={5}'.format(
         vm, config,
-        'off (only_wukong)' if only_wukong else 'on',
+        'on' if cp_on else 'off',
         'on' if wukong_on else 'off',
+        'on' if disk_on else 'off',
         'on (IMAP {0}@{1})'.format(email_user, imap_host) if email_on else 'off (manual via VNC)',
     ))
 
@@ -1323,6 +1432,7 @@ def run_all(vm, config, steam_user='', steam_pass='', only_wukong=False,
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     info('Кэш бинарей: {0}'.format(CACHE_DIR))
     _download_ffmpeg(CACHE_DIR / 'ffmpeg.exe')
+    _download_fio_msi(CACHE_DIR / 'fio.msi')
     _download_psexec(CACHE_DIR / 'PsExec.exe')
 
     # ── Поднимаем HTTP-сервер на весь run_all ───────────────────────────────
@@ -1343,9 +1453,19 @@ def run_all(vm, config, steam_user='', steam_pass='', only_wukong=False,
         _ga_put(ga, VM_BENCH_PY_LOCAL, VM_VMBENCH, 'vm_bench.py')
 
         _http_put_via_vm(ga, host_ip, port, 'ffmpeg.exe', VM_FFMPEG, 'ffmpeg.exe')
+        _http_put_via_vm(ga, host_ip, port, 'fio.msi', VM_FIO_MSI, 'fio.msi')
 
-        # Verify
-        missing = [p for p in (VM_VMBENCH, VM_FFMPEG) if not ga.file_exists(p)]
+        # Установка FIO нативным msiexec — никакого extracting на хосте.
+        # /qn = quiet, /i = install. QGA = LocalSystem → достаточно прав.
+        info('Установка fio через msiexec /qn...')
+        rc, out, err = ga.exec_wait(r'C:\Windows\System32\msiexec.exe',
+                                    ['/i', VM_FIO_MSI, '/qn'], timeout=120)
+        if rc != 0:
+            die('msiexec /i fio.msi /qn упал rc={0}\nstdout:{1}\nstderr:{2}'.format(
+                rc, (out or '').strip(), (err or '').strip()), rc=2)
+
+        # Verify (VM_FIO — install path "C:\Program Files\fio\fio.exe")
+        missing = [p for p in (VM_VMBENCH, VM_FFMPEG, VM_FIO) if not ga.file_exists(p)]
         if missing:
             die('После деплоя в VM не хватает:\n  ' + '\n  '.join(missing), rc=2)
         ok('Файлы в VM на месте')
@@ -1372,6 +1492,8 @@ def run_all(vm, config, steam_user='', steam_pass='', only_wukong=False,
             imap_host, email_user, email_pass,
             host_url, state.token,
             str(iterations),
+            '1' if only_disk else '',
+            '1' if skip_disk else '',
         ]
         _launch_via_schtasks(ga, py_args)
 
@@ -1482,11 +1604,15 @@ _USAGE = (
     '        Без них код придётся ввести вручную через VNC.\n'
     '\n'
     '        Debug — только Wukong (пропустить Cyberpunk): ONLY_WUKONG=1\n'
+    '        Disk-only (только FIO seq+rand на F:, без cp/wk/NVENC):\n'
+    '          ONLY_DISK=1   или короче:  pkbench.py disk <vm>\n'
+    '        Пропустить disk-фазу (только cp/wk): SKIP_DISK=1\n'
     '\n'
     '        Прогнать бенч N раз подряд (default 1): ITERATIONS=10\n'
     '        Steam залогинивается один раз, manifest подкладывается один раз,\n'
     '        NVENC поднимается один раз. Результат: {"iterations": N, "runs": [...]}.\n'
     '\n'
+    '    pkbench.py disk <vm>              — только FIO disk-бенч на F: (без игр)\n'
     '    pkbench.py cat <vm> <winpath>     — debug: cat файла на VM в stdout\n'
 )
 
@@ -1508,6 +1634,16 @@ def main():
             die('cat: ожидалось `cat <vm> <winpath>`', rc=2)
         return _do_cat(argv[1], argv[2])
 
+    # `pkbench.py disk <vm>` — disk-only флоу (без cp/wk/NVENC).
+    # Эквивалент ONLY_DISK=1 ./pkbench.py <vm> vk, просто короче с CLI.
+    only_disk_cmd = False
+    if argv[0] == 'disk':
+        if len(argv) != 2:
+            sys.stderr.write(_USAGE)
+            die('disk: ожидалось `disk <vm>`', rc=2)
+        only_disk_cmd = True
+        argv = [argv[1], 'vk']    # config неактуален для disk-only, ставим dummy
+
     vm = argv[0]
     config = argv[1] if len(argv) > 1 else 'vk'
     if config not in ('vk', 'rt', '2k'):
@@ -1515,6 +1651,8 @@ def main():
     steam_user, steam_pass = _resolve_steam_credentials()
     imap_host, email_user, email_pass = _resolve_email_credentials()
     only_wukong = _env_flag('ONLY_WUKONG')
+    only_disk   = only_disk_cmd or _env_flag('ONLY_DISK')
+    skip_disk   = _env_flag('SKIP_DISK')
     try:
         iterations = int(os.environ.get('ITERATIONS', '1'))
     except ValueError:
@@ -1525,7 +1663,8 @@ def main():
     run_all(vm, config, steam_user, steam_pass,
             only_wukong=only_wukong,
             imap_host=imap_host, email_user=email_user, email_pass=email_pass,
-            iterations=iterations)
+            iterations=iterations,
+            only_disk=only_disk, skip_disk=skip_disk)
 
 
 if __name__ == '__main__':

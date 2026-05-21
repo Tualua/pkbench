@@ -60,6 +60,11 @@ RESULT_FILE  = BENCH_DIR / 'last_result.json'
 STATUS_FILE  = BENCH_DIR / 'last_status.json'
 FFMPEG_LOG   = BENCH_DIR / 'last_ffmpeg.log'
 FFMPEG_EXE   = BENCH_DIR / 'ffmpeg.exe'
+FIO_EXE      = Path(r'C:\Program Files\fio\fio.exe')   # msiexec install path
+FIO_CFG      = BENCH_DIR / 'fio.cfg'
+FIO_DATA     = Path(r'F:\benchmark\fio.dat')   # 64GB test-файл на тестируемом диске
+FIO_LOG      = BENCH_DIR / 'last_fio.log'      # stderr/прогресс FIO
+FIO_JSON     = BENCH_DIR / 'last_fio.json'     # `--output=` JSON-результат
 
 CYBERPUNK_LNK     = Path(r'F:\launch\Steam\steamapps\common\Cyberpunk 2077\bin\x64\Cyberpunk2077.lnk.lnk')
 CYBERPUNK_EXE     = Path(r'F:\launch\Steam\steamapps\common\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe')
@@ -1217,6 +1222,166 @@ def run_wukong_benchmark(steam_user, steam_pass, email_creds=None):
     return result
 
 
+# ── Disk benchmark (FIO) ─────────────────────────────────────────────────────
+# CrystalDiskMark-style паттерны: 4 пары (read+write), stonewall между всеми.
+# Имена job'ов сохраняем в формате `<pattern>-<rw>` (читаются человеком).
+FIO_DATASET_SIZE = '64G'
+FIO_RUNTIME_S    = 30   # на фазу; 8 фаз × 30s + prefill ≈ 5-9 мин
+# Список (pattern_id, label, rw, bs, iodepth). Pattern_id = ключ в результате.
+FIO_PATTERNS = [
+    ('seq-1m-q8',  'SEQ 1M  Q8', 'write',     '1M', 8),
+    ('seq-1m-q8',  'SEQ 1M  Q8', 'read',      '1M', 8),
+    ('seq-1m-q1',  'SEQ 1M  Q1', 'write',     '1M', 1),
+    ('seq-1m-q1',  'SEQ 1M  Q1', 'read',      '1M', 1),
+    ('rnd-4k-q32', 'RND 4K Q32', 'randread',  '4k', 32),
+    ('rnd-4k-q32', 'RND 4K Q32', 'randwrite', '4k', 32),
+    ('rnd-4k-q1',  'RND 4K  Q1', 'randread',  '4k', 1),
+    ('rnd-4k-q1',  'RND 4K  Q1', 'randwrite', '4k', 1),
+]
+# Лейблы паттернов в порядке вывода (для CDM-style сводки на хосте).
+FIO_PATTERN_ORDER = [
+    ('seq-1m-q8',  'SEQ 1M  Q8'),
+    ('seq-1m-q1',  'SEQ 1M  Q1'),
+    ('rnd-4k-q32', 'RND 4K Q32'),
+    ('rnd-4k-q1',  'RND 4K  Q1'),
+]
+
+
+def _build_fio_config(filename_escaped):
+    """Сборка fio cfg по FIO_PATTERNS. Каждая job получает имя
+    `<pattern_id>-<read|write>` (random* нормализуем в read/write для имени)."""
+    lines = [
+        '[global]',
+        'filename={0}'.format(filename_escaped),
+        'size={0}'.format(FIO_DATASET_SIZE),
+        'direct=1',
+        'ioengine=windowsaio',
+        # thread=1 ОБЯЗАТЕЛЕН на Windows: иначе FIO на каждый job пишет
+        # warning "process shared mutexes ... forcing use of threads" в
+        # --output= файл ПЕРЕД JSON-документом → json.loads давится.
+        'thread=1',
+        'group_reporting=1',
+        'runtime={0}'.format(FIO_RUNTIME_S),
+        'time_based=1',
+        'norandommap=1',
+        'randrepeat=0',
+        '',
+    ]
+    for pid, _label, rw, bs, qd in FIO_PATTERNS:
+        side = 'read' if 'read' in rw else 'write'
+        lines.extend([
+            '[{0}-{1}]'.format(pid, side),
+            'rw={0}'.format(rw),
+            'bs={0}'.format(bs),
+            'iodepth={0}'.format(qd),
+            'stonewall',
+            '',
+        ])
+    return '\n'.join(lines)
+
+
+def _parse_fio_job(job):
+    """FIO JSON job → {bw_mb_s, iops, lat_ms}. Берём read или write подобъект
+    в зависимости от rw — у write-job read.iops=0 и наоборот."""
+    rw = job.get('job options', {}).get('rw', '')
+    side = 'write' if 'write' in rw else 'read'
+    sub  = job.get(side, {})
+    bw_bytes = sub.get('bw_bytes') or (sub.get('bw') or 0) * 1024  # 'bw' — KB/s в legacy
+    iops = sub.get('iops') or 0
+    clat = sub.get('clat_ns', {}).get('mean') or 0
+    return {
+        'bw_mb_s': round(bw_bytes / (1024.0 * 1024.0), 1),
+        'iops':    int(round(iops)),
+        'lat_ms':  round(clat / 1e6, 3),
+    }
+
+
+def run_disk_benchmark():
+    """Прогнать FIO CDM-style паттерны на F:. Возвращает dict {pattern_id:
+    {'read': {bw/iops/lat}, 'write': {...}}}. NVENC должен быть остановлен
+    ДО вызова (чистые цифры)."""
+    if not FIO_EXE.exists():
+        raise RuntimeError('fio.exe не найден на VM: {0}'.format(FIO_EXE))
+
+    # Гарантируем что директория для test-файла существует.
+    FIO_DATA.parent.mkdir(parents=True, exist_ok=True)
+
+    # В fio cfg `:` в путях экранируется (он разделяет multiple filenames).
+    cfg_text = _build_fio_config(str(FIO_DATA).replace(':', '\\:'))
+    FIO_CFG.write_text(cfg_text, encoding='utf-8')
+    log('FIO config: {0} ({1} jobs)'.format(FIO_CFG, len(FIO_PATTERNS)))
+    log('Запуск FIO ({0} dataset, {1} фаз × {2}s, target={3})...'.format(
+        FIO_DATASET_SIZE, len(FIO_PATTERNS), FIO_RUNTIME_S, FIO_DATA))
+
+    _safe_unlink(FIO_JSON)
+    timeout_s = FIO_RUNTIME_S * len(FIO_PATTERNS) + 900    # +15min на prefill
+    with open(str(FIO_LOG), 'w', encoding='utf-8') as logfh:
+        try:
+            cp = subprocess.run(
+                [str(FIO_EXE),
+                 '--output=' + str(FIO_JSON),
+                 '--output-format=json',
+                 str(FIO_CFG)],
+                stdout=logfh,
+                stderr=subprocess.STDOUT,
+                timeout=timeout_s,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError('FIO висит дольше {0}s — таймаут'.format(timeout_s))
+
+    if cp.returncode != 0:
+        raise RuntimeError('FIO упал rc={0}, см. {1}'.format(cp.returncode, FIO_LOG))
+
+    # Диагностика если JSON отсутствует или пустой: дампим первые 1KB лога
+    # FIO в ошибку — без этого "Expecting value" непрозрачно.
+    json_size = FIO_JSON.stat().st_size if FIO_JSON.exists() else -1
+    if json_size <= 0:
+        log_excerpt = ''
+        if FIO_LOG.exists():
+            try:
+                log_excerpt = FIO_LOG.read_text(encoding='utf-8', errors='replace')[:1024]
+            except Exception:
+                pass
+        raise RuntimeError(
+            'FIO rc=0, но JSON {0} size={1}. FIO stdout/stderr (first 1KB):\n{2}'
+            .format(FIO_JSON, json_size, log_excerpt))
+
+    raw_text = FIO_JSON.read_text(encoding='utf-8')
+    try:
+        raw = json.loads(raw_text)
+    except Exception as ex:
+        raise RuntimeError(
+            'FIO JSON не парсится: {0}\n  first 500 chars: {1!r}'.format(
+                ex, raw_text[:500]))
+
+    jobs = raw.get('jobs') or []
+    log('FIO вернул {0} job-записей'.format(len(jobs)))
+    by_name = {j.get('jobname', ''): _parse_fio_job(j) for j in jobs}
+
+    # Группируем по pattern_id с side (read/write).
+    result = {
+        'dataset_size': FIO_DATASET_SIZE,
+        'runtime_s':    FIO_RUNTIME_S,
+        'patterns':     {},
+    }
+    for pid, _label, rw, _bs, _qd in FIO_PATTERNS:
+        side = 'read' if 'read' in rw else 'write'
+        job_name = '{0}-{1}'.format(pid, side)
+        result['patterns'].setdefault(pid, {})[side] = by_name.get(job_name)
+
+    log('Disk результат: ' + json.dumps(result, ensure_ascii=False))
+
+    # Cleanup test-файла — он 64GB, держать смысла нет.
+    try:
+        FIO_DATA.unlink()
+        log('Удалён {0}'.format(FIO_DATA))
+    except Exception as ex:
+        log('WARN: не смог удалить {0}: {1}'.format(FIO_DATA, ex))
+
+    return result
+
+
 # ── HTTP push на хост (live логи + артефакты) ────────────────────────────────
 # pkbench.py поднимает HTTP-сервер на хосте и передаёт URL+token в .bat
 # арг'ах 8/9. Мы используем его для live-логирования (чтобы оператор видел
@@ -1359,12 +1524,14 @@ def main():
         iterations = 1
     if iterations < 1:
         iterations = 1
+    only_disk     = (len(sys.argv) > 11 and sys.argv[11] == '1')
+    skip_disk     = (len(sys.argv) > 12 and sys.argv[12] == '1')
     email_creds = (imap_host, email_user, email_pass) if (imap_host and email_user and email_pass) else None
 
     # Чистим артефакты прошлого запуска ДО редиректа stdio: появление STATUS_FILE
     # = сигнал хосту что мы закончили, его остатки от прошлого прогона дадут
     # ложный hit.
-    for f in (LOG_FILE, RESULT_FILE, STATUS_FILE, FFMPEG_LOG):
+    for f in (LOG_FILE, RESULT_FILE, STATUS_FILE, FFMPEG_LOG, FIO_LOG, FIO_JSON):
         _safe_unlink(f)
 
     _redirect_stdio_to_log()
@@ -1379,10 +1546,16 @@ def main():
             host_url, '<set>' if http_token else ''))
 
     wukong_skipped = not (steam_user and steam_pass)
-    log('vm_bench start: config={0} cyberpunk={1} wukong={2} iterations={3}'.format(
+    # only_disk перевешивает остальное — пропускаем cp/wk полностью, NVENC не
+    # стартуем (чистый disk-бенч без mixed-нагрузки).
+    cp_skipped = only_wukong or only_disk
+    wukong_skipped = wukong_skipped or only_disk
+    disk_skipped = skip_disk and not only_disk
+    log('vm_bench start: config={0} cyberpunk={1} wukong={2} disk={3} iterations={4}'.format(
         config,
-        'off' if only_wukong else 'on',
+        'off' if cp_skipped else 'on',
         'on' if not wukong_skipped else 'off',
+        'off' if disk_skipped else 'on',
         iterations,
     ))
 
@@ -1401,19 +1574,24 @@ def main():
     runs = []
     cyberpunk_ok_count = 0
     wukong_ok_count = 0
+    disk_result = None
+    disk_error = None
 
     try:
-        if only_wukong and wukong_skipped:
+        if only_wukong and wukong_skipped and not only_disk:
             raise RuntimeError(
                 'only_wukong=1 но Steam credentials не заданы — нечего запускать. '
                 'Передай STEAM_USER/STEAM_PASS env, либо не ставь ONLY_WUKONG.'
             )
 
-        # NVENC поднимается один раз на весь run, держится через все итерации.
-        ffmpeg_proc, nvenc_err = start_nvenc_load()
-        if ffmpeg_proc is None:
-            raise RuntimeError('NVENC load не стартовал: ' + (nvenc_err or 'unknown'))
-        log('NVENC load запущен (pid={0})'.format(ffmpeg_proc.pid))
+        # only_disk пропускает cp+wk и NVENC. Disk должен быть изолирован
+        # (без GPU encode нагрузки) для чистых disk-цифр.
+        if not only_disk:
+            # NVENC поднимается один раз на весь run, держится через все итерации.
+            ffmpeg_proc, nvenc_err = start_nvenc_load()
+            if ffmpeg_proc is None:
+                raise RuntimeError('NVENC load не стартовал: ' + (nvenc_err or 'unknown'))
+            log('NVENC load запущен (pid={0})'.format(ffmpeg_proc.pid))
 
         # ── Внешний loop итераций ───────────────────────────────────────────
         # Steam логинится один раз (в первой итерации), manifest подкладывается
@@ -1421,57 +1599,78 @@ def main():
         # (ActiveUser != 0 + manifest на месте), Wukong просто applaunch'ится
         # заново с тем же Steam. Cyberpunk запускается каждую итерацию свежим
         # процессом.
-        for outer_i in range(1, iterations + 1):
-            log('')
-            log('### ИТЕРАЦИЯ {0}/{1} ###'.format(outer_i, iterations))
-            run_entry = {
-                'iteration':       outer_i,
-                'cyberpunk':       None,
-                'wukong':          None,
-                'wukong_error':    None,
-            }
+        if not only_disk:
+            for outer_i in range(1, iterations + 1):
+                log('')
+                log('### ИТЕРАЦИЯ {0}/{1} ###'.format(outer_i, iterations))
+                run_entry = {
+                    'iteration':       outer_i,
+                    'cyberpunk':       None,
+                    'wukong':          None,
+                    'wukong_error':    None,
+                }
 
-            # Cyberpunk
-            if not only_wukong:
-                run_entry['cyberpunk'] = run_cyberpunk_benchmark(config, iterations=cp_inner)
-                cyberpunk_ok_count += 1
-                if ffmpeg_proc.poll() is not None:
-                    nvenc_died_early = True
-                    nvenc_returncode = ffmpeg_proc.returncode
-                    raise RuntimeError(
-                        'NVENC ffmpeg умер мид-бенч (rc={0}) на iter {1} — '
-                        'результат не репрезентативен'.format(nvenc_returncode, outer_i)
-                    )
+                # Cyberpunk
+                if not only_wukong:
+                    run_entry['cyberpunk'] = run_cyberpunk_benchmark(config, iterations=cp_inner)
+                    cyberpunk_ok_count += 1
+                    if ffmpeg_proc.poll() is not None:
+                        nvenc_died_early = True
+                        nvenc_returncode = ffmpeg_proc.returncode
+                        raise RuntimeError(
+                            'NVENC ffmpeg умер мид-бенч (rc={0}) на iter {1} — '
+                            'результат не репрезентативен'.format(nvenc_returncode, outer_i)
+                        )
 
-            # Wukong
-            if not wukong_skipped:
-                try:
-                    run_entry['wukong'] = run_wukong_benchmark(steam_user, steam_pass, email_creds)
-                    wukong_ok_count += 1
-                except Exception:
-                    run_entry['wukong_error'] = traceback.format_exc()
-                    log('Wukong FAIL на iter {0}:\n{1}'.format(outer_i, run_entry['wukong_error']))
-                    if only_wukong:
+                # Wukong
+                if not wukong_skipped:
+                    try:
+                        run_entry['wukong'] = run_wukong_benchmark(steam_user, steam_pass, email_creds)
+                        wukong_ok_count += 1
+                    except Exception:
+                        run_entry['wukong_error'] = traceback.format_exc()
+                        log('Wukong FAIL на iter {0}:\n{1}'.format(outer_i, run_entry['wukong_error']))
+                        if only_wukong:
+                            runs.append(run_entry)
+                            raise
+                    if ffmpeg_proc.poll() is not None:
+                        nvenc_died_early = True
+                        nvenc_returncode = ffmpeg_proc.returncode
                         runs.append(run_entry)
-                        raise
-                if ffmpeg_proc.poll() is not None:
-                    nvenc_died_early = True
-                    nvenc_returncode = ffmpeg_proc.returncode
-                    runs.append(run_entry)
-                    raise RuntimeError(
-                        'NVENC ffmpeg умер во время Wukong (rc={0}) на iter {1}'
-                        .format(nvenc_returncode, outer_i)
-                    )
+                        raise RuntimeError(
+                            'NVENC ffmpeg умер во время Wukong (rc={0}) на iter {1}'
+                            .format(nvenc_returncode, outer_i)
+                        )
 
-            runs.append(run_entry)
+                runs.append(run_entry)
+
+        # ── Disk бенч (после игр, NVENC ВЫКЛЮЧАЕМ для чистых цифр) ──────────
+        # Игры закончились — глушим NVENC ЗДЕСЬ (а не в finally), чтобы disk
+        # тестировался изолированно. Если NVENC уже умер мид-бенч — этот
+        # путь не выполняется (мы упали выше через raise).
+        if not disk_skipped:
+            if ffmpeg_proc is not None:
+                log('Остановка NVENC перед disk-фазой (чистые disk-цифры)')
+                stop_nvenc_load(ffmpeg_proc)
+                ffmpeg_proc = None
+            log('')
+            log('### DISK BENCHMARK ###')
+            try:
+                disk_result = run_disk_benchmark()
+            except Exception:
+                disk_error = traceback.format_exc()
+                log('Disk FAIL:\n' + disk_error)
 
         rc = 0
+        result_payload = {'iterations': iterations, 'runs': runs}
+        if disk_result is not None:
+            result_payload['disk'] = disk_result
         RESULT_FILE.write_text(
-            json.dumps({'iterations': iterations, 'runs': runs},
-                       ensure_ascii=False, indent=2),
+            json.dumps(result_payload, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
-        log('Результат записан в {0} ({1} runs)'.format(RESULT_FILE, len(runs)))
+        log('Результат записан в {0} ({1} runs, disk={2})'.format(
+            RESULT_FILE, len(runs), 'on' if disk_result else ('err' if disk_error else 'off')))
     except Exception:
         err = traceback.format_exc()
         log('FAIL:\n' + err)
@@ -1500,13 +1699,16 @@ def main():
             'nvenc_source':    'lavfi-testsrc-synthetic',
             'nvenc_died_early':       nvenc_died_early,
             'nvenc_returncode':       nvenc_returncode,
-            'cyberpunk_skipped':      only_wukong,
+            'cyberpunk_skipped':      cp_skipped,
             'cyberpunk_present':      last['cyberpunk'] is not None,
             'cyberpunk_ok_count':     cyberpunk_ok_count,
             'wukong_skipped':         wukong_skipped,
             'wukong_present':         last['wukong'] is not None,
             'wukong_ok_count':        wukong_ok_count,
             'wukong_error':           last['wukong_error'],
+            'disk_skipped':           disk_skipped,
+            'disk_present':           disk_result is not None,
+            'disk_error':             disk_error,
         }
         _write_status(status)
 
@@ -1517,6 +1719,8 @@ def main():
                 ('last_run.log',     LOG_FILE),
                 ('last_result.json', RESULT_FILE),
                 ('last_ffmpeg.log',  FFMPEG_LOG),
+                ('last_fio.log',     FIO_LOG),
+                ('last_fio.json',    FIO_JSON),
                 ('last_status.json', STATUS_FILE),
             ):
                 if path.exists():
